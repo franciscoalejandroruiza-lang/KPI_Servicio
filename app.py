@@ -111,15 +111,37 @@ if archivo_subido:
         st.header("📋 Conteo de Folios Resueltos")
         st.dataframe(df_res.groupby(['Técnico', 'Categoría']).size().unstack(fill_value=0), use_container_width=True)
 
-    # --- PESTAÑA: DETALLE DE PENALIZACIONES ---
+# --- PESTAÑA: DETALLE DE PENALIZACIONES (Agrupado por Técnico) ---
     with t_penalizaciones:
-        st.header("⚠️ Auditoría de Reincidencias")
+        st.header("⚠️ Auditoría de Reincidencias por Técnico")
+        
         if not df_pen.empty:
-            st.write("Lista de penalizaciones aplicadas por fallas no resueltas en la primera visita:")
-            st.dataframe(df_pen, use_container_width=True)
+            st.info("""
+                **Nota de Transparencia:** Las penalizaciones se asignan a los técnicos que atendieron 
+                el equipo anteriormente sin resolver la falla de raíz. El técnico que resolvió 
+                el problema en el mes actual NO es penalizado.
+            """)
+            
+            # Agrupamos por técnico para que cada uno vea su detalle
+            tecnicos_penalizados = sorted(df_pen['Técnico'].unique())
+            
+            for tec in tecnicos_penalizados:
+                with st.expander(f"👤 Detalles para: {tec}"):
+                    df_tec_especifico = df_pen[df_pen['Técnico'] == tec].copy()
+                    
+                    # Renombramos para mayor claridad en la tabla del técnico
+                    df_tec_view = df_tec_especifico[[
+                        'Serie', 'Cliente', 'Fecha Falla Previa', 'Folio Detonante', 'Puntos Negativos'
+                    ]].rename(columns={
+                        'Fecha Falla Previa': 'Tu Visita Anterior',
+                        'Folio Detonante': 'Folio que Reincidió',
+                        'Puntos Negativos': 'Deducción'
+                    })
+                    
+                    st.table(df_tec_view)
+                    st.caption(f"Total de penalizaciones para {tec}: {len(df_tec_especifico)}")
         else:
-            st.success("Cero reincidencias detectadas en este periodo.")
-
+            st.success("✅ No se detectaron fallas recurrentes en el historial analizado.")
     # --- PESTAÑA: TOP FALLAS ---
     with t_top:
         st.header(f"🔝 Equipos con más fallas (Ventana de {meses_atras_reinc} meses)")
