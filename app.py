@@ -16,7 +16,7 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("📊 Control de Ingeniería y Productividad - SenIntegral")
+st.title("📊 SenAudit Pro - SenIntegral")
 
 # --- BARRA LATERAL ---
 st.sidebar.header("📁 Panel de Control")
