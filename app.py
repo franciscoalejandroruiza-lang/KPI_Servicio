@@ -60,18 +60,27 @@ if archivo_subido:
             st.session_state.pesos_dict[cat] = st.slider(f"Puntos por {cat}:", -5.0, 20.0, st.session_state.pesos_dict.get(cat, 1.0), 0.5)
         val_reinc = st.number_input("Descuento por cada reincidencia previa:", 0.0, 10.0, 2.0)
 
-    # --- CÁLCULO DE PENALIZACIONES (SIN AMBIGÜEDAD) ---
+    # --- CÁLCULO DE PENALIZACIONES CON EXCLUSIÓN ---
     df_res['Pts_Base'] = df_res['Categoría'].map(st.session_state.pesos_dict).fillna(0.0)
     lista_penalizaciones = []
 
+    # En la configuración, bajamos el valor por defecto a 1.0 para que no sea tan agresivo
+    with t_config:
+        st.header("⚙️ Configuración de Calidad")
+        # ... (tus otros sliders de categorías)
+        val_reinc = st.number_input("Descuento por cada reincidencia previa:", 0.0, 10.0, 1.0) # Ahora por defecto es 1.0
+
     for _, fila in df_res.iterrows():
         if fila['Categoría'] == 'CORRECTIVO':
-            # Buscamos todas las fallas previas de esta serie
+            # Buscamos fallas previas de esta serie
             anteriores = historial[(historial['Serie'] == fila['Serie']) & (historial['Categoría'] == 'CORRECTIVO')]
             
             for _, ant in anteriores.iterrows():
-                # Regla: Penalizar a los anteriores, pero NO al técnico que resolvió hoy
-                if ant['Técnico'] != fila['Técnico']:
+                # REGLA 1: No penalizar al técnico que resolvió hoy
+                # REGLA 2: No penalizar si el técnico anterior es "CHI SISTEMAS"
+                tec_anterior = str(ant['Técnico']).upper().strip()
+                
+                if ant['Técnico'] != fila['Técnico'] and "CHI SISTEMAS" not in tec_anterior:
                     lista_penalizaciones.append({
                         'Técnico': ant['Técnico'],
                         'Serie': fila['Serie'],
@@ -82,7 +91,6 @@ if archivo_subido:
                     })
 
     df_pen = pd.DataFrame(lista_penalizaciones)
-
     # --- PESTAÑA: PUNTAJE FINAL ---
     with t_resumen:
         # 1. Base
