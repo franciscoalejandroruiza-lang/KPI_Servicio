@@ -2,10 +2,37 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# 1. Configuración de la página
-st.set_page_config(page_title="Confiabilidad Técnica | SenIntegral", layout="wide")
+# 1. CONFIGURACIÓN DE SEGURIDAD Y PÁGINA
+# Esto oculta opciones de "View Source" en el menú desplegable
+st.set_page_config(
+    page_title="SenIntegral - Auditoría Técnica Pro", 
+    layout="wide",
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': "Propiedad Intelectual de Alejandro Ruiz. Prohibida su reproducción."
+    }
+)
 
-# Inicialización de estados
+# --- BLOQUE DE PROPIEDAD INTELECTUAL (MODAL) ---
+@st.dialog("Aviso de Confidencialidad")
+def mostrar_aviso_legal():
+    st.warning("⚠️ ACCESO RESTRINGIDO")
+    st.write("""
+        Este software es **Propiedad Intelectual Privada**. 
+        El uso de esta herramienta está limitado al personal autorizado de la planta.
+        Al continuar, usted acepta que no intentará copiar, distribuir ni realizar 
+        ingeniería inversa sobre este código.
+    """)
+    if st.button("Acepto los Términos y Condiciones"):
+        st.session_state.legal_accepted = True
+        st.rerun()
+
+if "legal_accepted" not in st.session_state:
+    mostrar_aviso_legal()
+    st.stop()
+
+# --- INICIALIZACIÓN DE ESTADOS ---
 if 'lista_extras' not in st.session_state: st.session_state.lista_extras = []
 if 'pesos_dict' not in st.session_state: st.session_state.pesos_dict = {}
 
@@ -15,158 +42,128 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("🛡️ Gestión de Confiabilidad Técnica - SenIntegral")
+st.title("📊 SenAudit Pro - Gestión de Manufactura")
+st.sidebar.markdown("© 2026 Propiedad Privada")
 
 # --- BARRA LATERAL ---
-st.sidebar.header("📁 Panel de Datos")
+st.sidebar.header("📁 Panel de Control")
 archivo_subido = st.sidebar.file_uploader("Subir reporte Excel/CSV", type=["xlsx", "csv"])
-meses_atras_reinc = st.sidebar.slider("Ventana de historial (Meses)", 1, 12, 3)
+meses_atras_reinc = st.sidebar.slider("Meses para rastrear responsables anteriores", 1, 12, 3)
 
 if archivo_subido:
-    # Carga y limpieza
+    # Carga de datos
     df = pd.read_excel(archivo_subido) if archivo_subido.name.endswith('.xlsx') else pd.read_csv(archivo_subido, encoding='latin-1')
     df.columns = df.columns.str.strip()
     
-    # Estandarización de nombres de columnas
+    # Estandarización
     df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
-    cliente_col = "Nombre comercial" if "Nombre comercial" in df.columns else "Cliente"
+    cliente_col = "Nombre comercial" if "Nombre comercial" in df.columns else ("Nombre legal" if "Nombre legal" in df.columns else "Cliente")
+    
+    if 'Categoría' in df.columns:
+        df['Categoría'] = df['Categoría'].astype(str).str.upper().str.strip()
     
     df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
-    df = df.dropna(subset=['Fecha recepción', 'Técnico', 'Serie'])
+    df = df.dropna(subset=['Fecha recepción', 'Técnico'])
     df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
 
     periodos = df.sort_values('Fecha recepción', ascending=False)['Mes_Año'].unique()
-    periodo_sel = st.sidebar.selectbox("📅 Seleccionar Mes a Evaluar:", periodos)
+    periodo_sel = st.sidebar.selectbox("📅 Periodo a Evaluar:", periodos)
 
     # --- PESTAÑAS ---
     t_resumen, t_matriz, t_penalizaciones, t_top, t_adicionales, t_config = st.tabs([
-        "📈 Puntaje Final", "📋 Matriz Operativa", "⚠️ Detalle Penalizaciones", "🔝 Top Fallas", "📝 Actividades Extras", "⚙️ Configuración"
+        "📈 Puntaje Final", "📋 Matriz Operativa", "⚠️ Penalizaciones", "🔝 Top Fallas", "📝 Extras", "⚙️ Config"
     ])
 
-    # --- LÓGICA DE PROCESAMIENTO ---
+    # --- LÓGICA DE CÁLCULO (RESPONSABILIDAD COLECTIVA) ---
     df_actual = df[df['Mes_Año'] == periodo_sel].copy()
     fecha_inicio_mes = df_actual['Fecha recepción'].min()
     fecha_limite_hist = fecha_inicio_mes - pd.DateOffset(months=meses_atras_reinc)
     
-    # Historial para buscar recurrencias
+    # Historial para reincidencias
     historial = df[(df['Fecha recepción'] < fecha_inicio_mes) & (df['Fecha recepción'] >= fecha_limite_hist)]
+    historial_corr = historial[historial['Categoría'] == 'CORRECTIVO'].copy()
     
-    # Solo tomamos lo RESUELTO para el puntaje base
+    # MAPEAMOS TODOS LOS TÉCNICOS POR SERIE (Uso de 'set' para evitar duplicados del mismo técnico)
+    dict_reinc_colectiva = historial_corr.groupby('Serie')['Técnico'].apply(set).to_dict()
+
     df_res = df_actual[df_actual['Estatus'] == 'RESUELTA'].copy()
 
     with t_config:
-        st.header("⚙️ Configuración de Calidad")
-        for cat in sorted(df['Categoría'].unique()):
-            st.session_state.pesos_dict[cat] = st.slider(f"Puntos por {cat}:", -5.0, 20.0, st.session_state.pesos_dict.get(cat, 1.0), 0.5)
-        val_reinc = st.number_input("Descuento por cada reincidencia previa:", 0.0, 10.0, 2.0)
+        st.header("⚙️ Configuración de Pesos")
+        for cat in [c for c in df['Categoría'].dropna().unique() if str(c) != 'NAN']:
+            st.session_state.pesos_dict[cat] = st.slider(f"Puntos: {cat}", -5.0, 20.0, st.session_state.pesos_dict.get(cat, 1.0), 0.5)
+        val_reinc = st.number_input("Descuento por cada técnico reincidente", 0.0, 10.0, 1.0)
 
-    # --- CÁLCULO DE PENALIZACIONES CON EXCLUSIÓN ---
+    # Procesamiento de Puntos y Penalizaciones Colectivas
     df_res['Pts_Base'] = df_res['Categoría'].map(st.session_state.pesos_dict).fillna(0.0)
     lista_penalizaciones = []
-
-    # En la configuración, bajamos el valor por defecto a 1.0 para que no sea tan agresivo
-    with t_config:
-        st.header("⚙️ Configuración de Calidad")
-        # ... (tus otros sliders de categorías)
-        val_reinc = st.number_input("Descuento por cada reincidencia previa:", 0.0, 10.0, 1.0) # Ahora por defecto es 1.0
-
+    
     for _, fila in df_res.iterrows():
-        if fila['Categoría'] == 'CORRECTIVO':
-            # Buscamos fallas previas de esta serie
-            anteriores = historial[(historial['Serie'] == fila['Serie']) & (historial['Categoría'] == 'CORRECTIVO')]
-            
-            for _, ant in anteriores.iterrows():
-                # REGLA 1: No penalizar al técnico que resolvió hoy
-                # REGLA 2: No penalizar si el técnico anterior es "CHI SISTEMAS"
-                tec_anterior = str(ant['Técnico']).upper().strip()
-                
-                if ant['Técnico'] != fila['Técnico'] and "CHI SISTEMAS" not in tec_anterior:
+        # Si falla en marzo (Iván) y hubo visitas previas (Carlos, Pedro)
+        if fila['Categoría'] == 'CORRECTIVO' and fila['Serie'] in dict_reinc_colectiva:
+            for tec_pasado in dict_reinc_colectiva[fila['Serie']]:
+                # Opcional: No penalizar al mismo Iván si él mismo fue antes
+                if tec_pasado != fila['Técnico']:
                     lista_penalizaciones.append({
-                        'Técnico': ant['Técnico'],
-                        'Serie': fila['Serie'],
+                        'Técnico Penalizado': tec_pasado, 
                         'Cliente': fila[cliente_col],
-                        'Folio Detonante': fila['Folio'],
-                        'Fecha Falla Previa': ant['Fecha recepción'].strftime('%Y-%m-%d'),
-                        'Puntos Negativos': val_reinc
+                        'Serie': fila['Serie'], 
+                        'Folio Detonante': fila['Folio'], 
+                        'Descuento': val_reinc
                     })
-
+    
     df_pen = pd.DataFrame(lista_penalizaciones)
+
     # --- PESTAÑA: PUNTAJE FINAL ---
     with t_resumen:
-        # 1. Base
-        res = df_res.groupby('Técnico')['Pts_Base'].sum().reset_index()
+        st.header(f"Resumen de Puntuación: {periodo_sel}")
+        resumen = df_res.groupby('Técnico')['Pts_Base'].sum().reset_index()
         
-        # 2. Extras
-        df_ex = pd.DataFrame(st.session_state.lista_extras)
-        if not df_ex.empty:
+        if st.session_state.lista_extras:
+            df_ex = pd.DataFrame(st.session_state.lista_extras)
             ex_sum = df_ex[df_ex['Periodo'] == periodo_sel].groupby('Técnico')['Puntos Extra'].sum().reset_index()
-            res = pd.merge(res, ex_sum, on='Técnico', how='outer').fillna(0)
+            resumen = pd.merge(resumen, ex_sum, on='Técnico', how='outer').fillna(0)
+            resumen['Subtotal'] = resumen['Pts_Base'] + resumen['Puntos Extra']
         else:
-            res['Puntos Extra'] = 0.0
+            resumen['Puntos Extra'], resumen['Subtotal'] = 0.0, resumen['Pts_Base']
 
-        # 3. Penalizaciones
         if not df_pen.empty:
-            pen_sum = df_pen.groupby('Técnico')['Puntos Negativos'].sum().reset_index()
-            res = pd.merge(res, pen_sum, on='Técnico', how='outer').fillna(0)
+            p_neg = df_pen.groupby('Técnico Penalizado')['Descuento'].sum().reset_index()
+            p_neg.columns = ['Técnico', 'Penalización']
+            resumen = pd.merge(resumen, p_neg, on='Técnico', how='outer').fillna(0)
+            resumen['TOTAL NETO'] = resumen['Subtotal'] - resumen['Penalización']
         else:
-            res['Puntos Negativos'] = 0.0
+            resumen['Penalización'], resumen['TOTAL NETO'] = 0.0, resumen['Subtotal']
+        
+        st.dataframe(resumen[['Técnico', 'Pts_Base', 'Puntos Extra', 'Penalización', 'TOTAL NETO']].sort_values('TOTAL NETO', ascending=False), use_container_width=True)
+        st.plotly_chart(px.bar(resumen, x='TOTAL NETO', y='Técnico', orientation='h', title="Ranking de Productividad", color='TOTAL NETO', color_continuous_scale='Blues'))
 
-        res['TOTAL NETO'] = (res['Pts_Base'] + res['Puntos Extra']) - res['Puntos Negativos']
-        st.dataframe(res.sort_values('TOTAL NETO', ascending=False), use_container_width=True)
+    # --- PESTAÑA: DETALLE PENALIZACIONES ---
+    with t_penalizaciones:
+        st.header("⚠️ Detalle de Responsabilidad Colectiva")
+        if not df_pen.empty:
+            for tec in sorted(df_pen['Técnico Penalizado'].unique()):
+                with st.expander(f"🔴 Penalizaciones para: {tec}"):
+                    df_tec_pen = df_pen[df_pen['Técnico Penalizado'] == tec]
+                    st.table(df_tec_pen[['Cliente', 'Serie', 'Folio Detonante', 'Descuento']])
+        else:
+            st.success("No se detectaron reincidencias.")
 
-    # --- PESTAÑA: MATRIZ OPERATIVA ---
+    # --- PESTAÑA: MATRIZ ---
     with t_matriz:
-        st.header("📋 Conteo de Folios Resueltos")
+        st.header("📋 Conteo por Actividad")
         st.dataframe(df_res.groupby(['Técnico', 'Categoría']).size().unstack(fill_value=0), use_container_width=True)
 
-# --- PESTAÑA: DETALLE DE PENALIZACIONES (Agrupado por Técnico) ---
-    with t_penalizaciones:
-        st.header("⚠️ Auditoría de Reincidencias por Técnico")
-        
-        if not df_pen.empty:
-            st.info("""
-                **Nota de Transparencia:** Las penalizaciones se asignan a los técnicos que atendieron 
-                el equipo anteriormente sin resolver la falla de raíz. El técnico que resolvió 
-                el problema en el mes actual NO es penalizado.
-            """)
-            
-            # Agrupamos por técnico para que cada uno vea su detalle
-            tecnicos_penalizados = sorted(df_pen['Técnico'].unique())
-            
-            for tec in tecnicos_penalizados:
-                with st.expander(f"👤 Detalles para: {tec}"):
-                    df_tec_especifico = df_pen[df_pen['Técnico'] == tec].copy()
-                    
-                    # Renombramos para mayor claridad en la tabla del técnico
-                    df_tec_view = df_tec_especifico[[
-                        'Serie', 'Cliente', 'Fecha Falla Previa', 'Folio Detonante', 'Puntos Negativos'
-                    ]].rename(columns={
-                        'Fecha Falla Previa': 'Tu Visita Anterior',
-                        'Folio Detonante': 'Folio que Reincidió',
-                        'Puntos Negativos': 'Deducción'
-                    })
-                    
-                    st.table(df_tec_view)
-                    st.caption(f"Total de penalizaciones para {tec}: {len(df_tec_especifico)}")
-        else:
-            st.success("✅ No se detectaron fallas recurrentes en el historial analizado.")
-    # --- PESTAÑA: TOP FALLAS ---
-    with t_top:
-        st.header(f"🔝 Equipos con más fallas (Ventana de {meses_atras_reinc} meses)")
-        df_rango = pd.concat([historial, df_actual])
-        top = df_rango[df_rango['Categoría'] == 'CORRECTIVO'].groupby(['Serie', cliente_col]).size().reset_index(name='Total Fallas')
-        st.table(top.sort_values('Total Fallas', ascending=False).head(10))
-
-    # --- PESTAÑA: ACTIVIDADES EXTRAS ---
+    # --- PESTAÑA: ADICIONALES ---
     with t_adicionales:
-        with st.form("extras"):
+        with st.form("form_extras"):
             c1, c2, c3 = st.columns(3)
-            t_ex = c1.selectbox("Técnico", sorted(df['Técnico'].unique()))
-            desc_ex = c2.text_input("Descripción")
-            pts_ex = c3.number_input("Puntos", value=1.0)
-            if st.form_submit_button("Registrar"):
-                st.session_state.lista_extras.append({'Técnico': t_ex, 'Actividad': desc_ex, 'Puntos Extra': pts_ex, 'Periodo': periodo_sel})
+            tec_ad = c1.selectbox("Técnico", sorted(df['Técnico'].unique()))
+            nom_ad = c2.text_input("Actividad")
+            val_ad = c3.number_input("Puntos", value=1.0, step=0.5)
+            if st.form_submit_button("Añadir"):
+                st.session_state.lista_extras.append({'Técnico': tec_ad, 'Actividad': nom_ad.upper(), 'Puntos Extra': val_ad, 'Periodo': periodo_sel})
                 st.rerun()
 
 else:
-    st.info("Por favor, sube el archivo Excel para iniciar la auditoría de SenIntegral.")
+    st.info("Suba el reporte Excel para comenzar.")
