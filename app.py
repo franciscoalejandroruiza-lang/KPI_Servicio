@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import timedelta
 
-# 1. CONFIGURACIÓN
-st.set_page_config(page_title="SenAudit Pro - Auditoría Dinámica", layout="wide")
+# 1. CONFIGURACIÓN DE PÁGINA
+st.set_page_config(page_title="SenAudit Pro - Historial Dinámico", layout="wide")
 
 # --- BLOQUE DE SEGURIDAD ---
 if "legal_accepted" not in st.session_state:
@@ -24,21 +24,20 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("📊 SenAudit Pro - Control de Historial Activo")
+st.title("📊 SenAudit Pro - Reporte con Historial desde el Mes de Revisión")
 
-# --- CONFIGURACIÓN LATERAL (UI solicitada) ---
+# --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
 archivo = st.sidebar.file_uploader("Cargar Reporte (Excel/CSV)", type=["xlsx", "csv"])
-
-# Slider funcional: Define qué tan atrás buscamos "goles" o fallas
-meses_h = st.sidebar.slider("Meses de historial a considerar", 1, 12, 3)
+# El slider ahora controla el bloque de 90 días/3 meses
+meses_atras = st.sidebar.slider("Meses de historial a considerar", 1, 6, 3)
 
 if archivo:
-    # 2. CARGA Y LIMPIEZA
+    # 2. CARGA Y LIMPIEZA DE DATOS
     df = pd.read_excel(archivo) if archivo.name.endswith('.xlsx') else pd.read_csv(archivo, encoding='latin-1')
     df.columns = df.columns.str.strip()
     
-    # Normalización
+    # Normalización de Series y Técnicos
     df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
     df['Serie'] = df['Serie'].astype(str).str.strip().str.lstrip('0')
     df['Técnico'] = df['Técnico'].astype(str).str.replace('CH ', '', regex=False).str.replace('CHI ', '', regex=False).str.strip().str.upper()
@@ -51,72 +50,80 @@ if archivo:
     df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
     df = df.sort_values('Fecha recepción')
     
-    periodo_sel = st.sidebar.selectbox("📅 Mes a Evaluar:", df['Mes_Año'].unique()[::-1])
+    periodos = df['Mes_Año'].unique()[::-1]
+    periodo_sel = st.sidebar.selectbox("📅 Mes a Evaluar:", periodos)
 
-    # --- MOTOR DE AUDITORÍA CON HISTORIAL DINÁMICO ---
+    # --- LÓGICA DE TIEMPO AJUSTADA ---
+    # 1. Determinamos el inicio del mes que se está revisando
     df_mes_actual = df[df['Mes_Año'] == periodo_sel].copy()
+    fecha_inicio_revision = df_mes_actual['Fecha recepción'].min().replace(day=1)
+    
+    # 2. Calculamos la fecha límite (ej. 90 días antes del inicio del mes)
+    fecha_limite_historial = fecha_inicio_revision - timedelta(days=meses_atras * 30)
+
+    # --- MOTOR DE PENALIZACIÓN ---
     lista_penalizaciones = []
 
     for _, fila_actual in df_mes_actual.iterrows():
-        # LÓGICA DEL SLIDER: Calculamos la fecha límite restando meses
-        # Usamos 30 días por mes para una aproximación precisa del historial
-        fecha_limite = fila_actual['Fecha recepción'] - timedelta(days=meses_h * 30)
-        
-        # Buscamos historial de la serie en ese rango
-        historial = df[
+        # Buscamos historial de la serie desde la fecha límite hasta el momento justo antes de esta visita
+        historial_previo = df[
             (df['Serie'] == fila_actual['Serie']) & 
             (df['Fecha recepción'] < fila_actual['Fecha recepción']) &
-            (df['Fecha recepción'] >= fecha_limite)
+            (df['Fecha recepción'] >= fecha_limite_historial)
         ].sort_values('Fecha recepción', ascending=False)
         
-        if not historial.empty:
-            # Barrido: Todas las fallas previas (CORRECTIVO/REINCIDENCIA) son penalizables
-            reincidencias = historial[historial['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])]
+        if not historial_previo.empty:
+            # Filtramos folios penalizables (Correctivos/Reincidencias)
+            reincidencias = historial_previo[historial_previo['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])]
             
             for _, fila_pen in reincidencias.iterrows():
+                # No penalizar si el técnico es el mismo
                 if fila_pen['Técnico'] != fila_actual['Técnico']:
                     lista_penalizaciones.append({
                         'Técnico Penalizado': fila_pen['Técnico'],
                         'Serie': fila_actual['Serie'],
-                        'Folio de su Falla': fila_pen['Folio'],
-                        'Fecha de su Falla': fila_pen['Fecha recepción'].strftime('%d/%m/%Y'),
-                        'Detonado por Folio': fila_actual['Folio'],
-                        'Fecha del Detonante': fila_actual['Fecha recepción'].strftime('%d/%m/%Y'),
+                        'Folio su Falla': fila_pen['Folio'],
+                        'Fecha su Falla': fila_pen['Fecha recepción'].strftime('%d/%m/%Y'),
+                        'Detonado por': fila_actual['Folio'],
+                        'Fecha Detonante': fila_actual['Fecha recepción'].strftime('%d/%m/%Y'),
                         'Puntos': 1.0
                     })
 
     df_pen = pd.DataFrame(lista_penalizaciones)
     if not df_pen.empty:
-        df_pen = df_pen.drop_duplicates(subset=['Técnico Penalizado', 'Folio de su Falla', 'Detonado por Folio'])
+        df_pen = df_pen.drop_duplicates(subset=['Técnico Penalizado', 'Folio su Falla', 'Detonado por'])
 
-    # --- VISUALIZACIÓN ---
-    tab_resumen, tab_auditoria = st.tabs(["📈 Puntaje Final", "📋 Auditoría Agrupada"])
+    # --- INTERFAZ DE RESULTADOS ---
+    tab1, tab2 = st.tabs(["📈 Resumen de Puntos", "📋 Detalle por Técnico"])
 
-    with tab_resumen:
-        # Puntos positivos
-        resumen = df_mes_actual[df_mes_actual['Estatus'] == 'RESUELTA'].groupby('Técnico').size().reset_index(name='Servicios')
-        resumen['Pts_Ganados'] = resumen['Servicios'] * 1.0
+    with tab1:
+        st.info(f"📅 Auditoría activa desde: **{fecha_limite_historial.strftime('%d/%B/%Y')}** hasta el cierre de **{periodo_sel}**")
         
-        # Restar penalizaciones
+        # Conteo de servicios positivos
+        resumen = df_mes_actual[df_mes_actual['Estatus'] == 'RESUELTA'].groupby('Técnico').size().reset_index(name='Servicios')
+        resumen['Pts_Positivos'] = resumen['Servicios'] * 1.0
+        
+        # Integración de penalizaciones
         if not df_pen.empty:
             p_neg = df_pen.groupby('Técnico Penalizado')['Puntos'].sum().reset_index()
             p_neg.columns = ['Técnico', 'Penalización']
-            resumen = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
+            resumen_final = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
         else:
             resumen['Penalización'] = 0.0
+            resumen_final = resumen
 
-        resumen['TOTAL'] = resumen['Pts_Ganados'] - resumen['Penalización']
-        st.dataframe(resumen.sort_values('TOTAL', ascending=False), use_container_width=True)
+        resumen_final['TOTAL'] = resumen_final['Pts_Positivos'] - resumen_final['Penalización']
+        st.dataframe(resumen_final.sort_values('TOTAL', ascending=False), use_container_width=True)
 
-    with tab_auditoria:
+    with tab2:
         if not df_pen.empty:
-            tecnicos = sorted(df_pen['Técnico Penalizado'].unique())
-            for tec in tecnicos:
+            tecnicos_con_falla = sorted(df_pen['Técnico Penalizado'].unique())
+            for tec in tecnicos_con_falla:
                 datos_tec = df_pen[df_pen['Técnico Penalizado'] == tec]
-                with st.expander(f"👤 {tec} — Penalizaciones Totales: -{len(datos_tec)}"):
-                    st.table(datos_tec[['Serie', 'Folio de su Falla', 'Fecha de su Falla', 'Detonado por Folio']])
+                with st.expander(f"👤 {tec} — Total Goles: -{len(datos_tec)}"):
+                    st.table(datos_tec[['Serie', 'Folio su Falla', 'Fecha su Falla', 'Detonado por', 'Fecha Detonante']])
         else:
-            st.info(f"No hay reincidencias en los últimos {meses_h} meses para este periodo.")
+            st.success("No se encontraron reincidencias en el periodo de 90 días configurado.")
 
 else:
-    st.info("Sube el archivo para activar el análisis de historial.")
+    st.info("Sube el reporte de servicios para iniciar el análisis.")
