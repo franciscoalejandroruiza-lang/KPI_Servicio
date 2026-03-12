@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.express as px
 
 # 1. CONFIGURACIÓN DE SEGURIDAD Y PÁGINA
-# Esto oculta opciones de "View Source" en el menú desplegable
 st.set_page_config(
     page_title="SenIntegral - Auditoría Técnica Pro", 
     layout="wide",
@@ -55,7 +54,7 @@ if archivo_subido:
     df = pd.read_excel(archivo_subido) if archivo_subido.name.endswith('.xlsx') else pd.read_csv(archivo_subido, encoding='latin-1')
     df.columns = df.columns.str.strip()
     
-    # Estandarización
+    # Estandarización de columnas
     df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
     cliente_col = "Nombre comercial" if "Nombre comercial" in df.columns else ("Nombre legal" if "Nombre legal" in df.columns else "Cliente")
     
@@ -74,16 +73,16 @@ if archivo_subido:
         "📈 Puntaje Final", "📋 Matriz Operativa", "⚠️ Penalizaciones", "🔝 Top Fallas", "📝 Extras", "⚙️ Config"
     ])
 
-    # --- LÓGICA DE CÁLCULO (RESPONSABILIDAD COLECTIVA) ---
+    # --- LÓGICA DE CÁLCULO ---
     df_actual = df[df['Mes_Año'] == periodo_sel].copy()
     fecha_inicio_mes = df_actual['Fecha recepción'].min()
     fecha_limite_hist = fecha_inicio_mes - pd.DateOffset(months=meses_atras_reinc)
     
     # Historial para reincidencias
     historial = df[(df['Fecha recepción'] < fecha_inicio_mes) & (df['Fecha recepción'] >= fecha_limite_hist)]
-    historial_corr = historial[historial['Categoría'] == 'CORRECTIVO'].copy()
+    historial_corr = historial[historial['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])].copy()
     
-    # MAPEAMOS TODOS LOS TÉCNICOS POR SERIE (Uso de 'set' para evitar duplicados del mismo técnico)
+    # Mapeo de técnicos previos por serie
     dict_reinc_colectiva = historial_corr.groupby('Serie')['Técnico'].apply(set).to_dict()
 
     df_res = df_actual[df_actual['Estatus'] == 'RESUELTA'].copy()
@@ -92,25 +91,31 @@ if archivo_subido:
         st.header("⚙️ Configuración de Pesos")
         for cat in [c for c in df['Categoría'].dropna().unique() if str(c) != 'NAN']:
             st.session_state.pesos_dict[cat] = st.slider(f"Puntos: {cat}", -5.0, 20.0, st.session_state.pesos_dict.get(cat, 1.0), 0.5)
-        val_reinc = st.number_input("Descuento por cada técnico reincidente", 0.0, 10.0, 1.0)
+        val_reinc = st.number_input("Descuento por cada técnico reincidente (-1)", 0.0, 10.0, 1.0)
 
-    # Procesamiento de Puntos y Penalizaciones Colectivas
+    # Procesamiento de Puntos y Penalizaciones ÚNICAS
     df_res['Pts_Base'] = df_res['Categoría'].map(st.session_state.pesos_dict).fillna(0.0)
-    lista_penalizaciones = []
     
+    lista_penalizaciones = []
+    penalizaciones_registradas = set() # Para evitar duplicados (Técnico, Serie)
+
     for _, fila in df_res.iterrows():
-        # Si falla en marzo (Iván) y hubo visitas previas (Carlos, Pedro)
+        # Si es correctivo y alguien más lo vio antes en el historial
         if fila['Categoría'] == 'CORRECTIVO' and fila['Serie'] in dict_reinc_colectiva:
             for tec_pasado in dict_reinc_colectiva[fila['Serie']]:
-                # Opcional: No penalizar al mismo Iván si él mismo fue antes
-                if tec_pasado != fila['Técnico']:
+                
+                # Regla: No se penaliza a sí mismo y solo se penaliza una vez por serie
+                id_penalizacion = (tec_pasado, fila['Serie'])
+                
+                if tec_pasado != fila['Técnico'] and id_penalizacion not in penalizaciones_registradas:
                     lista_penalizaciones.append({
-                        'Técnico Penalizado': tec_pasado, 
+                        'Técnico': tec_pasado, 
                         'Cliente': fila[cliente_col],
                         'Serie': fila['Serie'], 
                         'Folio Detonante': fila['Folio'], 
                         'Descuento': val_reinc
                     })
+                    penalizaciones_registradas.add(id_penalizacion)
     
     df_pen = pd.DataFrame(lista_penalizaciones)
 
@@ -119,6 +124,7 @@ if archivo_subido:
         st.header(f"Resumen de Puntuación: {periodo_sel}")
         resumen = df_res.groupby('Técnico')['Pts_Base'].sum().reset_index()
         
+        # Agregar Extras
         if st.session_state.lista_extras:
             df_ex = pd.DataFrame(st.session_state.lista_extras)
             ex_sum = df_ex[df_ex['Periodo'] == periodo_sel].groupby('Técnico')['Puntos Extra'].sum().reset_index()
@@ -127,10 +133,11 @@ if archivo_subido:
         else:
             resumen['Puntos Extra'], resumen['Subtotal'] = 0.0, resumen['Pts_Base']
 
+        # Agregar Penalizaciones (Merge corregido por columna 'Técnico')
         if not df_pen.empty:
-            p_neg = df_pen.groupby('Técnico Penalizado')['Descuento'].sum().reset_index()
+            p_neg = df_pen.groupby('Técnico')['Descuento'].sum().reset_index()
             p_neg.columns = ['Técnico', 'Penalización']
-            resumen = pd.merge(resumen, p_neg, on='Técnico', how='outer').fillna(0)
+            resumen = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
             resumen['TOTAL NETO'] = resumen['Subtotal'] - resumen['Penalización']
         else:
             resumen['Penalización'], resumen['TOTAL NETO'] = 0.0, resumen['Subtotal']
@@ -140,14 +147,14 @@ if archivo_subido:
 
     # --- PESTAÑA: DETALLE PENALIZACIONES ---
     with t_penalizaciones:
-        st.header("⚠️ Detalle de Responsabilidad Colectiva")
+        st.header("⚠️ Detalle de Responsabilidad Colectiva (Penalización Única)")
         if not df_pen.empty:
-            for tec in sorted(df_pen['Técnico Penalizado'].unique()):
+            for tec in sorted(df_pen['Técnico'].unique()):
                 with st.expander(f"🔴 Penalizaciones para: {tec}"):
-                    df_tec_pen = df_pen[df_pen['Técnico Penalizado'] == tec]
+                    df_tec_pen = df_pen[df_pen['Técnico'] == tec]
                     st.table(df_tec_pen[['Cliente', 'Serie', 'Folio Detonante', 'Descuento']])
         else:
-            st.success("No se detectaron reincidencias.")
+            st.success("No se detectaron reincidencias en este periodo.")
 
     # --- PESTAÑA: MATRIZ ---
     with t_matriz:
@@ -164,6 +171,5 @@ if archivo_subido:
             if st.form_submit_button("Añadir"):
                 st.session_state.lista_extras.append({'Técnico': tec_ad, 'Actividad': nom_ad.upper(), 'Puntos Extra': val_ad, 'Periodo': periodo_sel})
                 st.rerun()
-
 else:
     st.info("Suba el reporte Excel para comenzar.")
