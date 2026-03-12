@@ -1,129 +1,90 @@
 import streamlit as st
 import pandas as pd
-from datetime import timedelta
+import plotly.express as px
+from logic import process_data, calculate_penalties
 
-# 1. CONFIGURACIÓN DE PÁGINA
-st.set_page_config(page_title="SenAudit Pro - Historial Dinámico", layout="wide")
+# Configuración visual estilo profesional
+st.set_page_config(page_title="Dashboard Servicio Técnico", layout="wide")
 
-# --- BLOQUE DE SEGURIDAD ---
-if "legal_accepted" not in st.session_state:
-    @st.dialog("Aviso de Privacidad")
-    def aviso():
-        st.warning("⚠️ ACCESO RESTRINGIDO")
-        st.write("Propiedad de Alejandro Ruiz. Análisis de KPIs y Reincidencias.")
-        if st.button("Acepto los Términos"):
-            st.session_state.legal_accepted = True
-            st.rerun()
-    aviso()
-    st.stop()
+# Mantener estado de las asignaciones especiales entre clics
+if 'special_tasks' not in st.session_state:
+    st.session_state.special_tasks = pd.DataFrame(columns=['Técnico', 'Actividad', 'Puntaje'])
 
-# --- MAPEO DE MESES ---
-MESES_MAP = {
-    'January': 'Enero', 'February': 'Febrero', 'March': 'Marzo', 'April': 'Abril',
-    'May': 'Mayo', 'June': 'Junio', 'July': 'Julio', 'August': 'Agosto',
-    'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
-}
+st.title("📊 Análisis de Reportes de Servicio")
 
-st.title("📊 SenAudit Pro - Reporte con Historial desde el Mes de Revisión")
+# Sidebar para carga de archivos
+with st.sidebar:
+    st.header("Carga de Datos")
+    uploaded_file = st.file_uploader("Subir CSV o Excel", type=['csv', 'xlsx'])
+    st.divider()
+    st.info("Configura los meses y penalizaciones en la primera pestaña.")
 
-# --- BARRA LATERAL ---
-st.sidebar.header("⚙️ Configuración")
-archivo = st.sidebar.file_uploader("Cargar Reporte (Excel/CSV)", type=["xlsx", "csv"])
-# El slider ahora controla el bloque de 90 días/3 meses
-meses_atras = st.sidebar.slider("Meses de historial a considerar", 1, 6, 3)
-
-if archivo:
-    # 2. CARGA Y LIMPIEZA DE DATOS
-    df = pd.read_excel(archivo) if archivo.name.endswith('.xlsx') else pd.read_csv(archivo, encoding='latin-1')
-    df.columns = df.columns.str.strip()
+if uploaded_file:
+    # Carga automática según extensión
+    df_raw = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
     
-    # Normalización de Series y Técnicos
-    df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
-    df['Serie'] = df['Serie'].astype(str).str.strip().str.lstrip('0')
-    df['Técnico'] = df['Técnico'].astype(str).str.replace('CH ', '', regex=False).str.replace('CHI ', '', regex=False).str.strip().str.upper()
-    df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
-    df = df.dropna(subset=['Fecha recepción', 'Técnico', 'Serie'])
-    
-    if 'Categoría' in df.columns:
-        df['Categoría'] = df['Categoría'].astype(str).str.upper().str.strip()
+    # Definición de Pestañas (Igual a tu requerimiento)
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "Configuración", "Matriz de penalizaciones", 
+        "Reporte por técnico", "Top 3 fallas", 
+        "Asignación especial", "Resultado final"
+    ])
 
-    df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
-    df = df.sort_values('Fecha recepción')
-    
-    periodos = df['Mes_Año'].unique()[::-1]
-    periodo_sel = st.sidebar.selectbox("📅 Mes a Evaluar:", periodos)
+    with t1:
+        st.subheader("Configuración de Periodo y Puntajes")
+        c1, c2 = st.columns(2)
+        with c1:
+            mes_ref = st.date_input("Mes de análisis", value=pd.to_datetime("2026-03-10"))
+            meses_hist = st.number_input("Meses de historial", 0, 12, 1)
+        with c2:
+            sc_corr = st.number_input("Puntos por Correctivo", value=1.0)
+            sc_rein = st.number_input("Puntos por Reincidencia", value=1.0)
+            scores = {"CORRECTIVO": sc_corr, "REINCIDENCIA": sc_rein}
 
-    # --- LÓGICA DE TIEMPO AJUSTADA ---
-    # 1. Determinamos el inicio del mes que se está revisando
-    df_mes_actual = df[df['Mes_Año'] == periodo_sel].copy()
-    fecha_inicio_revision = df_mes_actual['Fecha recepción'].min().replace(day=1)
-    
-    # 2. Calculamos la fecha límite (ej. 90 días antes del inicio del mes)
-    fecha_limite_historial = fecha_inicio_revision - timedelta(days=meses_atras * 30)
-
-    # --- MOTOR DE PENALIZACIÓN ---
-    lista_penalizaciones = []
-
-    for _, fila_actual in df_mes_actual.iterrows():
-        # Buscamos historial de la serie desde la fecha límite hasta el momento justo antes de esta visita
-        historial_previo = df[
-            (df['Serie'] == fila_actual['Serie']) & 
-            (df['Fecha recepción'] < fila_actual['Fecha recepción']) &
-            (df['Fecha recepción'] >= fecha_limite_historial)
-        ].sort_values('Fecha recepción', ascending=False)
+        df_filtro = process_data(df_raw, mes_ref, meses_hist)
         
-        if not historial_previo.empty:
-            # Filtramos folios penalizables (Correctivos/Reincidencias)
-            reincidencias = historial_previo[historial_previo['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])]
-            
-            for _, fila_pen in reincidencias.iterrows():
-                # No penalizar si el técnico es el mismo
-                if fila_pen['Técnico'] != fila_actual['Técnico']:
-                    lista_penalizaciones.append({
-                        'Técnico Penalizado': fila_pen['Técnico'],
-                        'Serie': fila_actual['Serie'],
-                        'Folio su Falla': fila_pen['Folio'],
-                        'Fecha su Falla': fila_pen['Fecha recepción'].strftime('%d/%m/%Y'),
-                        'Detonado por': fila_actual['Folio'],
-                        'Fecha Detonante': fila_actual['Fecha recepción'].strftime('%d/%m/%Y'),
-                        'Puntos': 1.0
-                    })
+        # Métrica resaltada
+        resueltas = df_filtro[df_filtro['Estatus'] == 'RESUELTA'].shape[0]
+        st.metric("Total Reportes Resueltos", resueltas)
 
-    df_pen = pd.DataFrame(lista_penalizaciones)
-    if not df_pen.empty:
-        df_pen = df_pen.drop_duplicates(subset=['Técnico Penalizado', 'Folio su Falla', 'Detonado por'])
+    with t2:
+        st.subheader("Matriz de Penalizaciones")
+        matriz_df = calculate_penalties(df_filtro, scores)
+        st.dataframe(matriz_df, use_container_width=True, hide_index=True)
 
-    # --- INTERFAZ DE RESULTADOS ---
-    tab1, tab2 = st.tabs(["📈 Resumen de Puntos", "📋 Detalle por Técnico"])
+    with t3:
+        st.subheader("Reporte por Técnico")
+        reporte_t = df_filtro.groupby(['Técnico', 'Categoría']).size().reset_index(name='Total')
+        fig = px.bar(reporte_t, x='Técnico', y='Total', color='Categoría', barmode='group')
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(reporte_t.pivot(index='Técnico', columns='Categoría', values='Total').fillna(0), use_container_width=True)
 
-    with tab1:
-        st.info(f"📅 Auditoría activa desde: **{fecha_limite_historial.strftime('%d/%B/%Y')}** hasta el cierre de **{periodo_sel}**")
-        
-        # Conteo de servicios positivos
-        resumen = df_mes_actual[df_mes_actual['Estatus'] == 'RESUELTA'].groupby('Técnico').size().reset_index(name='Servicios')
-        resumen['Pts_Positivos'] = resumen['Servicios'] * 1.0
-        
-        # Integración de penalizaciones
-        if not df_pen.empty:
-            p_neg = df_pen.groupby('Técnico Penalizado')['Puntos'].sum().reset_index()
-            p_neg.columns = ['Técnico', 'Penalización']
-            resumen_final = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
-        else:
-            resumen['Penalización'] = 0.0
-            resumen_final = resumen
+    with t4:
+        st.subheader("Top 3 Fallas Más Frecuentes")
+        fallas = df_filtro['Problema reportado'].value_counts().head(3).reset_index()
+        fallas.columns = ['Falla', 'Cantidad']
+        fallas['%'] = (fallas['Cantidad'] / fallas['Cantidad'].sum() * 100).round(1)
+        st.table(fallas)
+        st.plotly_chart(px.pie(fallas, values='Cantidad', names='Falla'), use_container_width=True)
 
-        resumen_final['TOTAL'] = resumen_final['Pts_Positivos'] - resumen_final['Penalización']
-        st.dataframe(resumen_final.sort_values('TOTAL', ascending=False), use_container_width=True)
+    with t5:
+        st.subheader("Asignación Especial")
+        with st.form("extra_points"):
+            t_asig = st.selectbox("Técnico", sorted(df_raw['Técnico'].unique()))
+            act_asig = st.selectbox("Actividad", ["Capacitación", "Apoyo en campo", "Soporte crítico"])
+            pts_asig = st.number_input("Puntaje", value=0.0)
+            if st.form_submit_button("Añadir"):
+                nueva = pd.DataFrame([{'Técnico': t_asig, 'Actividad': act_asig, 'Puntaje': pts_asig}])
+                st.session_state.special_tasks = pd.concat([st.session_state.special_tasks, nueva], ignore_index=True)
+        st.dataframe(st.session_state.special_tasks, use_container_width=True)
 
-    with tab2:
-        if not df_pen.empty:
-            tecnicos_con_falla = sorted(df_pen['Técnico Penalizado'].unique())
-            for tec in tecnicos_con_falla:
-                datos_tec = df_pen[df_pen['Técnico Penalizado'] == tec]
-                with st.expander(f"👤 {tec} — Total Goles: -{len(datos_tec)}"):
-                    st.table(datos_tec[['Serie', 'Folio su Falla', 'Fecha su Falla', 'Detonado por', 'Fecha Detonante']])
-        else:
-            st.success("No se encontraron reincidencias en el periodo de 90 días configurado.")
-
+    with t6:
+        st.subheader("Consolidado Final")
+        final = df_filtro.groupby('Técnico').size().reset_index(name='Reportes atendidos')
+        final = final.merge(matriz_df[['Técnico', 'Total penalizaciones']], on='Técnico', how='left').fillna(0)
+        esp_sum = st.session_state.special_tasks.groupby('Técnico')['Puntaje'].sum().reset_index()
+        final = final.merge(esp_sum, on='Técnico', how='left').fillna(0)
+        final['Puntaje Final'] = final['Reportes atendidos'] - final['Total penalizaciones'] + final['Puntaje']
+        st.dataframe(final.sort_values(by='Puntaje Final', ascending=False), use_container_width=True, hide_index=True)
 else:
-    st.info("Sube el reporte de servicios para iniciar el análisis.")
+    st.info("Sube el archivo de reporte para activar el tablero.")
