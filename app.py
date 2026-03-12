@@ -13,15 +13,13 @@ st.set_page_config(
     }
 )
 
-# --- BLOQUE DE PROPIEDAD INTELECTUAL (MODAL) ---
+# --- BLOQUE DE PROPIEDAD INTELECTUAL ---
 @st.dialog("Aviso de Confidencialidad")
 def mostrar_aviso_legal():
     st.warning("⚠️ ACCESO RESTRINGIDO")
     st.write("""
         Este software es **Propiedad Intelectual Privada**. 
-        El uso de esta herramienta está limitado al personal autorizado de la planta.
-        Al continuar, usted acepta que no intentará copiar, distribuir ni realizar 
-        ingeniería inversa sobre este código.
+        El uso de esta herramienta está limitado al personal autorizado.
     """)
     if st.button("Acepto los Términos y Condiciones"):
         st.session_state.legal_accepted = True
@@ -31,7 +29,7 @@ if "legal_accepted" not in st.session_state:
     mostrar_aviso_legal()
     st.stop()
 
-# --- INICIALIZACIÓN DE ESTADOS ---
+# --- INICIALIZACIÓN ---
 if 'lista_extras' not in st.session_state: st.session_state.lista_extras = []
 if 'pesos_dict' not in st.session_state: st.session_state.pesos_dict = {}
 
@@ -41,135 +39,124 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("📊 SenAudit Pro - Gestión de Manufactura ptm")
+st.title("📊 SenAudit Pro - Gestión de Manufactura")
 st.sidebar.markdown("© 2026 Propiedad Privada")
 
 # --- BARRA LATERAL ---
-st.sidebar.header("📁 Panel de Control")
 archivo_subido = st.sidebar.file_uploader("Subir reporte Excel/CSV", type=["xlsx", "csv"])
-meses_atras_reinc = st.sidebar.slider("Meses para rastrear responsables anteriores", 1, 12, 3)
 
 if archivo_subido:
-    # Carga de datos
+    # CARGA Y LIMPIEZA CRÍTICA
     df = pd.read_excel(archivo_subido) if archivo_subido.name.endswith('.xlsx') else pd.read_csv(archivo_subido, encoding='latin-1')
     df.columns = df.columns.str.strip()
     
-    # Estandarización de columnas
+    # 1. Normalizar Series (Quitar ceros a la izquierda y espacios)
     df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
-    cliente_col = "Nombre comercial" if "Nombre comercial" in df.columns else ("Nombre legal" if "Nombre legal" in df.columns else "Cliente")
+    df['Serie'] = df['Serie'].astype(str).str.strip().str.lstrip('0')
     
+    # 2. Normalizar Técnicos (Quitar "CH " para que Iván Cano sea reconocido siempre)
+    df['Técnico'] = df['Técnico'].astype(str).str.replace('CH ', '', regex=False).str.strip().str.upper()
+    
+    # 3. Normalizar Fechas y Categorías
+    df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
+    df = df.dropna(subset=['Fecha recepción', 'Técnico', 'Serie'])
     if 'Categoría' in df.columns:
         df['Categoría'] = df['Categoría'].astype(str).str.upper().str.strip()
-    
-    df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
-    df = df.dropna(subset=['Fecha recepción', 'Técnico'])
-    df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
 
+    df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
     periodos = df.sort_values('Fecha recepción', ascending=False)['Mes_Año'].unique()
     periodo_sel = st.sidebar.selectbox("📅 Periodo a Evaluar:", periodos)
 
-    # --- PESTAÑAS ---
-    t_resumen, t_matriz, t_penalizaciones, t_top, t_adicionales, t_config = st.tabs([
-        "📈 Puntaje Final", "📋 Matriz Operativa", "⚠️ Penalizaciones", "🔝 Top Fallas", "📝 Extras", "⚙️ Config"
+    # PESTAÑAS
+    t_resumen, t_matriz, t_penalizaciones, t_adicionales, t_config = st.tabs([
+        "📈 Puntaje Final", "📋 Matriz Operativa", "⚠️ Penalizaciones", "📝 Extras", "⚙️ Config"
     ])
-
-    # --- LÓGICA DE CÁLCULO ---
-    df_actual = df[df['Mes_Año'] == periodo_sel].copy()
-    fecha_inicio_mes = df_actual['Fecha recepción'].min()
-    fecha_limite_hist = fecha_inicio_mes - pd.DateOffset(months=meses_atras_reinc)
-    
-    # Historial para reincidencias
-    historial = df[(df['Fecha recepción'] < fecha_inicio_mes) & (df['Fecha recepción'] >= fecha_limite_hist)]
-    historial_corr = historial[historial['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])].copy()
-    
-    # Mapeo de técnicos previos por serie
-    dict_reinc_colectiva = historial_corr.groupby('Serie')['Técnico'].apply(set).to_dict()
-
-    df_res = df_actual[df_actual['Estatus'] == 'RESUELTA'].copy()
 
     with t_config:
         st.header("⚙️ Configuración de Pesos")
-        for cat in [c for c in df['Categoría'].dropna().unique() if str(c) != 'NAN']:
+        for cat in sorted(df['Categoría'].unique()):
             st.session_state.pesos_dict[cat] = st.slider(f"Puntos: {cat}", -5.0, 20.0, st.session_state.pesos_dict.get(cat, 1.0), 0.5)
-        val_reinc = st.number_input("Descuento por cada técnico reincidente (-1)", 0.0, 10.0, 1.0)
+        val_reinc = st.number_input("Descuento por reincidencia (-1)", 0.0, 10.0, 1.0)
 
-    # Procesamiento de Puntos y Penalizaciones ÚNICAS
-    df_res['Pts_Base'] = df_res['Categoría'].map(st.session_state.pesos_dict).fillna(0.0)
+    # --- MOTOR DE CÁLCULO (POR FECHA EXACTA) ---
+    df_actual = df[df['Mes_Año'] == periodo_sel].copy()
+    df_actual['Pts_Base'] = df_actual['Categoría'].map(st.session_state.pesos_dict).fillna(0.0)
     
     lista_penalizaciones = []
-    penalizaciones_registradas = set() # Para evitar duplicados (Técnico, Serie)
+    penalizados_por_serie = set() # Evita que alguien pague doble por la misma serie
 
-    for _, fila in df_res.iterrows():
-        # Si es correctivo y alguien más lo vio antes en el historial
-        if fila['Categoría'] == 'CORRECTIVO' and fila['Serie'] in dict_reinc_colectiva:
-            for tec_pasado in dict_reinc_colectiva[fila['Serie']]:
-                
-                # Regla: No se penaliza a sí mismo y solo se penaliza una vez por serie
-                id_penalizacion = (tec_pasado, fila['Serie'])
-                
-                if tec_pasado != fila['Técnico'] and id_penalizacion not in penalizaciones_registradas:
+    # Solo penalizamos si el registro actual es un CORRECTIVO
+    df_correctivos = df_actual[df_actual['Categoría'] == 'CORRECTIVO'].copy()
+
+    for _, fila_actual in df_correctivos.iterrows():
+        # Buscamos quién estuvo en esta serie ANTES de este folio (en todo el historial disponible)
+        historial = df[
+            (df['Serie'] == fila_actual['Serie']) & 
+            (df['Fecha recepción'] < fila_actual['Fecha recepción'])
+        ].sort_values('Fecha recepción', ascending=False)
+
+        if not historial.empty:
+            tecnicos_previos = historial['Técnico'].unique()
+            for tec_pasado in tecnicos_previos:
+                # Si no es el mismo técnico y no ha pagado por esta serie aún
+                if tec_pasado != fila_actual['Técnico'] and (tec_pasado, fila_actual['Serie']) not in penalizados_por_serie:
                     lista_penalizaciones.append({
-                        'Técnico': tec_pasado, 
-                        'Cliente': fila[cliente_col],
-                        'Serie': fila['Serie'], 
-                        'Folio Detonante': fila['Folio'], 
+                        'Técnico': tec_pasado,
+                        'Serie': fila_actual['Serie'],
+                        'Folio Detonante': fila_actual['Folio'],
+                        'Fecha Detonante': fila_actual['Fecha recepción'],
                         'Descuento': val_reinc
                     })
-                    penalizaciones_registradas.add(id_penalizacion)
-    
+                    penalizados_por_serie.add((tec_pasado, fila_actual['Serie']))
+
     df_pen = pd.DataFrame(lista_penalizaciones)
 
-    # --- PESTAÑA: PUNTAJE FINAL ---
+    # --- PESTAÑA RESUMEN ---
     with t_resumen:
-        st.header(f"Resumen de Puntuación: {periodo_sel}")
-        resumen = df_res.groupby('Técnico')['Pts_Base'].sum().reset_index()
-        
-        # Agregar Extras
-        if st.session_state.lista_extras:
-            df_ex = pd.DataFrame(st.session_state.lista_extras)
-            ex_sum = df_ex[df_ex['Periodo'] == periodo_sel].groupby('Técnico')['Puntos Extra'].sum().reset_index()
-            resumen = pd.merge(resumen, ex_sum, on='Técnico', how='outer').fillna(0)
-            resumen['Subtotal'] = resumen['Pts_Base'] + resumen['Puntos Extra']
-        else:
-            resumen['Puntos Extra'], resumen['Subtotal'] = 0.0, resumen['Pts_Base']
+        # Sumamos puntos del mes (solo de lo RESUELTO para no inflar)
+        df_resueltas = df_actual[df_actual['Estatus'] == 'RESUELTA'].copy()
+        resumen = df_resueltas.groupby('Técnico')['Pts_Base'].sum().reset_index()
 
-        # Agregar Penalizaciones (Merge corregido por columna 'Técnico')
+        # Unimos Penalizaciones
         if not df_pen.empty:
             p_neg = df_pen.groupby('Técnico')['Descuento'].sum().reset_index()
             p_neg.columns = ['Técnico', 'Penalización']
             resumen = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
-            resumen['TOTAL NETO'] = resumen['Subtotal'] - resumen['Penalización']
         else:
-            resumen['Penalización'], resumen['TOTAL NETO'] = 0.0, resumen['Subtotal']
+            resumen['Penalización'] = 0.0
+
+        # Unimos Extras
+        if st.session_state.lista_extras:
+            df_ex = pd.DataFrame(st.session_state.lista_extras)
+            ex_sum = df_ex[df_ex['Periodo'] == periodo_sel].groupby('Técnico')['Puntos Extra'].sum().reset_index()
+            resumen = pd.merge(resumen, ex_sum, on='Técnico', how='left').fillna(0)
+        else:
+            resumen['Puntos Extra'] = 0.0
+
+        resumen['TOTAL NETO'] = resumen['Pts_Base'] + resumen['Puntos Extra'] - resumen['Penalización']
         
-        st.dataframe(resumen[['Técnico', 'Pts_Base', 'Puntos Extra', 'Penalización', 'TOTAL NETO']].sort_values('TOTAL NETO', ascending=False), use_container_width=True)
-        st.plotly_chart(px.bar(resumen, x='TOTAL NETO', y='Técnico', orientation='h', title="Ranking de Productividad", color='TOTAL NETO', color_continuous_scale='Blues'))
+        st.dataframe(resumen.sort_values('TOTAL NETO', ascending=False), use_container_width=True)
+        st.plotly_chart(px.bar(resumen, x='TOTAL NETO', y='Técnico', orientation='h', title="Productividad Final"))
 
-    # --- PESTAÑA: DETALLE PENALIZACIONES ---
+    # --- PESTAÑA DETALLE PENALIZACIONES ---
     with t_penalizaciones:
-        st.header("⚠️ Detalle de Responsabilidad Colectiva (Penalización Única)")
         if not df_pen.empty:
-            for tec in sorted(df_pen['Técnico'].unique()):
-                with st.expander(f"🔴 Penalizaciones para: {tec}"):
-                    df_tec_pen = df_pen[df_pen['Técnico'] == tec]
-                    st.table(df_tec_pen[['Cliente', 'Serie', 'Folio Detonante', 'Descuento']])
+            st.write("### Quién penalizó a quién (Basado en historial)")
+            st.dataframe(df_pen, use_container_width=True)
         else:
-            st.success("No se detectaron reincidencias en este periodo.")
+            st.success("No hay penalizaciones registradas.")
 
-    # --- PESTAÑA: MATRIZ ---
     with t_matriz:
-        st.header("📋 Conteo por Actividad")
-        st.dataframe(df_res.groupby(['Técnico', 'Categoría']).size().unstack(fill_value=0), use_container_width=True)
+        st.dataframe(df_actual.groupby(['Técnico', 'Categoría']).size().unstack(fill_value=0))
 
-    # --- PESTAÑA: ADICIONALES ---
     with t_adicionales:
-        with st.form("form_extras"):
+        with st.form("extras"):
             c1, c2, c3 = st.columns(3)
-            tec_ad = c1.selectbox("Técnico", sorted(df['Técnico'].unique()))
-            nom_ad = c2.text_input("Actividad")
-            val_ad = c3.number_input("Puntos", value=1.0, step=0.5)
-            if st.form_submit_button("Añadir"):
-                st.session_state.lista_extras.append({'Técnico': tec_ad, 'Actividad': nom_ad.upper(), 'Puntos Extra': val_ad, 'Periodo': periodo_sel})
+            t_ad = c1.selectbox("Técnico", sorted(df['Técnico'].unique()))
+            desc_ad = c2.text_input("Motivo")
+            pts_ad = c3.number_input("Puntos", value=1.0)
+            if st.form_submit_button("Guardar Extra"):
+                st.session_state.lista_extras.append({'Técnico': t_ad, 'Periodo': periodo_sel, 'Puntos Extra': pts_ad})
                 st.rerun()
 else:
-    st.info("Suba el reporte Excel para comenzar.")
+    st.info("Sube el archivo Excel para procesar.")
