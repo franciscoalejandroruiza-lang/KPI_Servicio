@@ -41,7 +41,7 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("📊 SenAudit Pro - Gestión de Manufactura")
+st.title("📊 SenAudit Pro - Gestión de Manufactura ptm")
 st.sidebar.markdown("© 2026 Propiedad Privada")
 
 # --- BARRA LATERAL ---
