@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
-# 1. CONFIGURACIÓN
-st.set_page_config(page_title="SenAudit Pro - Reporte de Reincidencias", layout="wide")
+# 1. CONFIGURACIÓN DE PÁGINA
+st.set_page_config(page_title="SenAudit Pro - Auditoría de Reincidencias Múltiples", layout="wide")
 
 # --- BLOQUE DE SEGURIDAD ---
 if "legal_accepted" not in st.session_state:
@@ -24,21 +23,19 @@ MESES_MAP = {
     'September': 'Septiembre', 'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
 }
 
-st.title("📊 SenAudit Pro - Análisis de Series")
+st.title("📊 SenAudit Pro - Reporte de Cadena de Fallas")
 
 # --- BARRA LATERAL ---
 st.sidebar.header("⚙️ Configuración")
 archivo_subido = st.sidebar.file_uploader("Subir reporte Excel/CSV", type=["xlsx", "csv"])
-
-# Configuración de meses atrás (Default 3: Ene, Dic, Nov si es Feb)
-meses_atras = st.sidebar.slider("Meses de historial a rastrear", 1, 12, 3)
+meses_atras_config = st.sidebar.slider("Meses de historial a rastrear", 1, 12, 3)
 
 if archivo_subido:
     # CARGA Y LIMPIEZA
     df = pd.read_excel(archivo_subido) if archivo_subido.name.endswith('.xlsx') else pd.read_csv(archivo_subido, encoding='latin-1')
     df.columns = df.columns.str.strip()
     
-    # Normalización de Series (03008454 -> 3008454) y Técnicos (CH IVAN -> IVAN)
+    # NORMALIZACIÓN
     df.rename(columns={col: "Serie" for col in df.columns if "serie" in col.lower()}, inplace=True)
     df['Serie'] = df['Serie'].astype(str).str.strip().str.lstrip('0')
     df['Técnico'] = df['Técnico'].astype(str).str.replace('CH ', '', regex=False).str.replace('CHI ', '', regex=False).str.strip().str.upper()
@@ -49,88 +46,80 @@ if archivo_subido:
         df['Categoría'] = df['Categoría'].astype(str).str.upper().str.strip()
 
     df['Mes_Año'] = df['Fecha recepción'].dt.month_name().map(MESES_MAP) + " " + df['Fecha recepción'].dt.year.astype(str)
-    periodo_sel = st.sidebar.selectbox("📅 Mes a Evaluar:", df['Mes_Año'].unique())
+    periodo_sel = st.sidebar.selectbox("📅 Seleccionar Mes a Evaluar:", df['Mes_Año'].unique())
 
-    # --- MOTOR DE PENALIZACIÓN DETALLADO ---
-    df_actual = df[df['Mes_Año'] == periodo_sel].copy()
-    inicio_mes = df_actual['Fecha recepción'].min()
-    limite_hist = inicio_mes - pd.DateOffset(months=meses_atras)
+    # --- MOTOR DE PENALIZACIÓN POR CADENA ---
+    # Evaluamos todo el historial para no perder registros
+    df_evaluado = df[df['Mes_Año'] == periodo_sel].copy()
     
-    lista_detallada_penalizaciones = []
-    series_penalizadas_por_tecnico = set() # Para el conteo de puntos final
+    lista_penalizaciones = []
+    series_ya_castigadas_por_tecnico = set() # (Técnico, Serie) para el puntaje neto
 
-    # Analizamos los CORRECTIVOS del mes
-    df_detonantes = df_actual[df_actual['Categoría'] == 'CORRECTIVO'].copy()
+    # Filtramos por los que reportan falla: CORRECTIVO y REINCIDENCIA
+    detonantes = df_evaluado[df_evaluado['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])].sort_values('Fecha recepción')
 
-    for _, fila_det in df_detonantes.iterrows():
-        # Buscamos quién estuvo antes en esta serie dentro del rango configurado
+    for _, fila_det in detonantes.iterrows():
+        # Límite de tiempo dinámico según slider
+        limite_hist = fila_det['Fecha recepción'] - pd.DateOffset(months=meses_atras_config)
+        
+        # Buscamos quién estuvo antes de ESTE folio específico
         historial = df[
             (df['Serie'] == fila_det['Serie']) & 
-            (df['Fecha recepción'] < fila_det['Fecha recepción']) &
+            (df['Fecha recepción'] < fila_det['Fecha recepción']) & 
             (df['Fecha recepción'] >= limite_hist)
         ].sort_values('Fecha recepción', ascending=False)
         
         if not historial.empty:
-            # Encontramos a todos los técnicos previos
-            tecnicos_previos = historial['Técnico'].unique()
+            # Tomamos al técnico inmediato anterior
+            ultima_visita = historial.iloc[0]
+            tec_previo = ultima_visita['Técnico']
             
-            for tec_p in tecnicos_previos:
-                if tec_p != fila_det['Técnico']:
-                    # Buscamos el folio específico de la visita de ese técnico
-                    visita_orig = historial[historial['Técnico'] == tec_p].iloc[0]
-                    
-                    # Decidimos si resta puntos (solo 1 vez por serie al mes)
-                    llave_puntos = (tec_p, fila_det['Serie'])
-                    punto_descontado = 0
-                    if llave_puntos not in series_penalizadas_por_tecnico:
-                        punto_descontado = 1.0
-                        series_penalizadas_por_tecnico.add(llave_puntos)
-                    
-                    # AGREGAMOS A LA LISTA (Aquí sí veremos las 6 fallas si existen)
-                    lista_detallada_penalizaciones.append({
-                        'Técnico': tec_p,
-                        'Serie': fila_det['Serie'],
-                        'Folio Visita Original': visita_orig['Folio'],
-                        'Fecha Visita': visita_orig['Fecha recepción'].strftime('%d/%m/%y'),
-                        'Folio Detonante (Falla)': fila_det['Folio'],
-                        'Fecha de Falla': fila_det['Fecha recepción'].strftime('%d/%m/%y'),
-                        'Puntos Restados': punto_descontado
-                    })
+            if tec_previo != fila_det['Técnico']:
+                # Lógica de puntos: Solo descontamos 1 vez por serie al mes para el TOTAL
+                descontar = 0
+                if (tec_previo, fila_det['Serie']) not in series_ya_castigadas_por_tecnico:
+                    descontar = 1.0
+                    series_ya_castigadas_por_tecnico.add((tec_previo, fila_det['Serie']))
+                
+                lista_penalizaciones.append({
+                    'Técnico Penalizado': tec_previo,
+                    'Serie': fila_det['Serie'],
+                    'Folio Su Visita': ultima_visita['Folio'],
+                    'Fecha Su Visita': ultima_visita['Fecha recepción'].strftime('%d/%m/%y %H:%M'),
+                    'Folio Detonante (Falla)': fila_det['Folio'],
+                    'Fecha de Falla': fila_det['Fecha recepción'].strftime('%d/%m/%y %H:%M'),
+                    'Categoría Falla': fila_det['Categoría'],
+                    'Resta Punto': descontar
+                })
 
-    df_pen = pd.DataFrame(lista_detallada_penalizaciones)
+    df_pen = pd.DataFrame(lista_penalizaciones)
 
     # --- PESTAÑAS ---
-    t_resumen, t_agrupado = st.tabs(["📈 Puntaje Final", "⚠️ Detalle por Técnico (Serie 3008454)"])
+    t_resumen, t_auditoria = st.tabs(["📈 Resumen de Puntos", "📋 Auditoría de Cadena"])
 
     with t_resumen:
-        df_ok = df_actual[df_actual['Estatus'] == 'RESUELTA'].copy()
-        # Asignamos 1 punto por cada servicio resuelto
-        resumen = df_ok.groupby('Técnico').size().reset_index(name='Visitas_Mes')
-        resumen['Pts_Ganados'] = resumen['Visitas_Mes'] * 1.0
+        df_resueltas = df_evaluado[df_evaluado['Estatus'] == 'RESUELTA'].copy()
+        resumen = df_resueltas.groupby('Técnico').size().reset_index(name='Visitas')
+        resumen['Pts_Positivos'] = resumen['Visitas'] * 1.0
         
         if not df_pen.empty:
-            # Sumamos los puntos restados (que gracias al set() solo será 1 por serie)
-            p_neg = df_pen.groupby('Técnico')['Puntos Restados'].sum().reset_index(name='Penalización')
+            p_neg = df_pen.groupby('Técnico Penalizado')['Resta Punto'].sum().reset_index()
+            p_neg.columns = ['Técnico', 'Penalización']
             resumen = pd.merge(resumen, p_neg, on='Técnico', how='left').fillna(0)
         else:
             resumen['Penalización'] = 0.0
 
-        resumen['TOTAL'] = resumen['Pts_Ganados'] - resumen['Penalización']
+        resumen['TOTAL'] = resumen['Pts_Positivos'] - resumen['Penalización']
         st.dataframe(resumen.sort_values('TOTAL', ascending=False), use_container_width=True)
 
-    with t_agrupado:
-        st.header(f"Desglose de Reincidencias (Rastreo: {meses_atras} meses)")
+    with t_auditoria:
+        st.header(f"Desglose Completo de Reincidencias - {periodo_sel}")
         if not df_pen.empty:
-            for tec in sorted(df_pen['Técnico'].unique()):
-                datos_tec = df_pen[df_pen['Técnico'] == tec]
-                total_puntos = datos_tec['Puntos Restados'].sum()
-                
-                with st.expander(f"👤 {tec} — Penalización Real: -{total_puntos}"):
-                    st.write(f"Mostrando todas las fallas detectadas para este técnico:")
-                    # Resaltamos las que sí restaron puntos y las que son informativas
-                    st.table(datos_tec[['Serie', 'Folio Visita Original', 'Fecha Visita', 'Folio Detonante (Falla)', 'Fecha de Falla', 'Puntos Restados']])
+            for tec in sorted(df_pen['Técnico Penalizado'].unique()):
+                datos = df_pen[df_pen['Técnico Penalizado'] == tec]
+                with st.expander(f"👤 {tec} — Penalizaciones Totales Aplicadas: -{datos['Resta Punto'].sum()}"):
+                    st.table(datos)
         else:
-            st.success("No se detectaron fallas con los parámetros actuales.")
-
+            st.success("No se detectaron reincidencias.")
 else:
-    st.info("Sube el archivo para iniciar.")
+    st.info("Suba el reporte para iniciar.")
