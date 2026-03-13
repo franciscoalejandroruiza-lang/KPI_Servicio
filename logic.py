@@ -46,3 +46,21 @@ def calculate_penalties(df_history, scores):
     resumen_p = df_penal.groupby('Técnico')['Puntos_Penalizacion'].sum().reset_index()
     resumen_p.columns = ['Técnico', 'Penalizaciones']
     return resumen_p
+# Agrega esto al final de logic.py
+
+def get_detailed_penalties(df_history, scores):
+    cat_target = ['CORRECTIVO', 'REINCIDENCIA']
+    df_penal = df_history[df_history['Categoría'].isin(cat_target)].copy()
+    df_penal = df_penal[~df_penal['Técnico'].str.contains('Sistemas', case=False, na=False)]
+    
+    if df_penal.empty:
+        return pd.DataFrame()
+
+    df_penal = df_penal.sort_values(by=['N.° de serie', 'Fecha recepción'])
+    df_penal['es_ultimo'] = df_penal.groupby('N.° de serie')['Fecha recepción'].transform('max') == df_penal['Fecha recepción']
+    
+    # Filtramos solo los registros que generaron penalización
+    df_detallado = df_penal[df_penal['es_ultimo'] == False].copy()
+    df_detallado['Puntos'] = df_detallado['Categoría'].map(scores)
+    
+    return df_detallado[['Fecha recepción', 'Técnico', 'N.° de serie', 'Modelo', 'Categoría', 'Puntos']]
