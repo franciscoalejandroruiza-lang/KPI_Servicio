@@ -1,67 +1,111 @@
+import streamlit as st
 import pandas as pd
+import plotly.express as px
+from logic import get_data_universe, calculate_penalties, get_detailed_penalties
 
-def get_data_universe(df, month_name, year, history_months):
-    """Limpia datos y segmenta el universo actual vs el historial de reincidencias."""
-    df.columns = df.columns.str.strip()
-    # Conversión segura de fechas
-    df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
-    
-    months_dict = {
-        "Enero": 1, "Febrero": 2, "Marzo": 3, "Abril": 4, "Mayo": 5, "Junio": 6,
-        "Julio": 7, "Agosto": 8, "Septiembre": 9, "Octubre": 10, "Noviembre": 11, "Diciembre": 12
-    }
-    
-    month_num = months_dict.get(month_name, 3)
-    
-    # Definición de rangos temporales
-    end_date = pd.Timestamp(year=year, month=month_num, day=1) + pd.offsets.MonthEnd(0)
-    start_date_history = (pd.Timestamp(year=year, month=month_num, day=1) - pd.DateOffset(months=history_months))
-    start_date_month = pd.Timestamp(year=year, month=month_num, day=1)
-    
-    df_history = df[(df['Fecha recepción'] >= start_date_history) & (df['Fecha recepción'] <= end_date)].copy()
-    df_current = df[(df['Fecha recepción'] >= start_date_month) & (df['Fecha recepción'] <= end_date)].copy()
-    
-    return df_history, df_current
+st.set_page_config(page_title="SenAudit Pro - KPI Técnico", layout="wide")
 
-def calculate_penalties(df_history, scores):
-    """Calcula el puntaje de penalización total por técnico."""
-    cat_target = ['CORRECTIVO', 'REINCIDENCIA']
-    df_penal = df_history[df_history['Categoría'].isin(cat_target)].copy()
-    
-    # Exclusión de personal administrativo/sistemas
-    if 'Técnico' in df_penal.columns:
-        df_penal = df_penal[~df_penal['Técnico'].str.contains('Sistemas', case=False, na=False)]
-    
-    if df_penal.empty:
-        return pd.DataFrame(columns=['Técnico', 'Penalizaciones'])
+# Inicialización de estado para tareas manuales
+if 'special_tasks' not in st.session_state:
+    st.session_state.special_tasks = pd.DataFrame(columns=['Técnico', 'Actividad', 'Puntaje'])
 
-    # Lógica de Responsabilidad: Penaliza si NO fue la última visita en el historial
-    df_penal = df_penal.sort_values(by=['N.° de serie', 'Fecha recepción'])
-    df_penal['es_ultimo'] = df_penal.groupby('N.° de serie')['Fecha recepción'].transform('max') == df_penal['Fecha recepción']
-    
-    def get_points(row):
-        return 0 if row['es_ultimo'] else scores.get(row['Categoría'], 1.0)
+st.title("📊 Análisis de Servicio Técnico y Reincidencias")
 
-    df_penal['Puntos_Penalizacion'] = df_penal.apply(get_points, axis=1)
-    
-    return df_penal.groupby('Técnico')['Puntos_Penalizacion'].sum().reset_index().rename(columns={'Puntos_Penalizacion': 'Penalizaciones'})
+with st.sidebar:
+    st.header("Carga de Datos")
+    uploaded_file = st.file_uploader("Subir Reporte (CSV/Excel)", type=['csv', 'xlsx'])
 
-def get_detailed_penalties(df_history, scores):
-    """Retorna el detalle de cada evento que generó penalización para análisis de tendencias."""
-    cat_target = ['CORRECTIVO', 'REINCIDENCIA']
-    df_penal = df_history[df_history['Categoría'].isin(cat_target)].copy()
-    
-    if 'Técnico' in df_penal.columns:
-        df_penal = df_penal[~df_penal['Técnico'].str.contains('Sistemas', case=False, na=False)]
-    
-    if df_penal.empty:
-        return pd.DataFrame()
+if uploaded_file:
+    # Lectura flexible
+    df_raw = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
 
-    df_penal = df_penal.sort_values(by=['N.° de serie', 'Fecha recepción'])
-    df_penal['es_ultimo'] = df_penal.groupby('N.° de serie')['Fecha recepción'].transform('max') == df_penal['Fecha recepción']
-    
-    # Filtramos eventos que 'rebotaron' (generaron penalización)
-    df_detallado = df_penal[df_penal['es_ultimo'] == False].copy()
-    df_detallado['Puntos'] = df_detallado['Categoría'].map(scores)
-    
-    return df_detallado
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "⚙️ Configuración", "📈 Resumen", "📋 Reporte Detallado", 
+        "⚠️ Penalización por Técnico", "🔍 Top Fallas (N/S)", "🏆 Resultado Final"
+    ])
+
+    with t1:
+        st.subheader("Parámetros de Evaluación")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mes_sel = st.selectbox("Mes de análisis", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"], index=2)
+        with c2:
+            año_sel = st.selectbox("Año", [2025, 2026], index=1)
+        with c3:
+            hist_sel = st.number_input("Meses de historial para auditar", 0, 12, 1)
+        
+        cp1, cp2 = st.columns(2)
+        p_corr = cp1.number_input("Puntos x Penalización Correctivo", value=1.0)
+        p_rein = cp2.number_input("Puntos x Penalización Reincidencia", value=1.0)
+        scores = {"CORRECTIVO": p_corr, "REINCIDENCIA": p_rein}
+
+        df_history, df_current = get_data_universe(df_raw, mes_sel, año_sel, hist_sel)
+
+    with t2:
+        st.subheader(f"Balance Operativo: {mes_sel} {año_sel}")
+        resueltos = df_current[df_current['Estatus'] == 'RESUELTA'].groupby('Técnico').size().reset_index(name='Reportes Resueltos')
+        penalizaciones = calculate_penalties(df_history, scores)
+        
+        resumen = pd.merge(resueltos, penalizaciones, on='Técnico', how='outer').fillna(0)
+        resumen['Total Neto'] = resumen['Reportes Resueltos'] - resumen['Penalizaciones']
+        
+        st.dataframe(resumen.sort_values(by='Total Neto', ascending=False), use_container_width=True, hide_index=True)
+        st.plotly_chart(px.bar(resumen, x='Técnico', y=['Reportes Resueltos', 'Penalizaciones'], barmode='group'), use_container_width=True)
+
+    with t3:
+        st.subheader("Concentrado de Servicios Resueltos")
+        df_res_det = df_current[df_current['Estatus'] == 'RESUELTA'].copy()
+        if not df_res_det.empty:
+            st.dataframe(df_res_det.groupby('Técnico').size().reset_index(name='Servicios'), use_container_width=True)
+            
+            # SELECCIÓN SEGURA DE COLUMNAS
+            cols_deseadas = ['Fecha recepción', 'Folio', 'Técnico', 'N.° de serie', 'Modelo', 'Falla']
+            cols_reales = [c for c in cols_deseadas if c in df_res_det.columns]
+            st.write("### Detalle Individual")
+            st.dataframe(df_res_det[cols_reales], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Sin datos resueltos en este periodo.")
+
+    with t4:
+        st.subheader("Análisis de Tendencias de Penalización")
+        df_penal_det = get_detailed_penalties(df_history, scores)
+        
+        if not df_penal_det.empty:
+            # Gráficos de Análisis
+            g1, g2 = st.columns(2)
+            with g1:
+                st.plotly_chart(px.bar(df_penal_det.groupby('Técnico').size().reset_index(name='Eventos'), 
+                                       x='Técnico', y='Eventos', title="Reincidencias por Técnico", color_discrete_sequence=['#FF4B4B']), use_container_width=True)
+            with g2:
+                st.plotly_chart(px.pie(df_penal_det, names='Modelo', title="Modelos con más reincidencias"), use_container_width=True)
+
+            st.write("### Agrupado para Análisis de Mejora")
+            agrup_audit = df_penal_det.groupby('Técnico').agg({'Puntos': 'sum', 'N.° de serie': 'count'}).reset_index()
+            agrup_audit.columns = ['Técnico', 'Puntos Restados', 'Número de Eventos']
+            st.dataframe(agrup_audit.sort_values(by='Puntos Restados', ascending=False), use_container_width=True, hide_index=True)
+            
+            with st.expander("Ver folios específicos para retroalimentación"):
+                cols_audit = [c for c in ['Fecha recepción', 'Técnico', 'N.° de serie', 'Modelo', 'Categoría', 'Puntos'] if c in df_penal_det.columns]
+                st.dataframe(df_penal_det[cols_audit], use_container_width=True, hide_index=True)
+        else:
+            st.success("No se detectaron tendencias de penalización.")
+
+    with t5:
+        st.subheader("Top 10 Equipos Críticos")
+        df_f = df_history[df_history['Categoría'].isin(['CORRECTIVO', 'REINCIDENCIA'])]
+        if not df_f.empty:
+            top = df_f.groupby(['N.° de serie', 'Modelo']).size().reset_index(name='Intervenciones').sort_values(by='Intervenciones', ascending=False).head(10)
+            st.table(top)
+        else:
+            st.info("No hay datos de fallas suficientes.")
+
+    with t6:
+        st.subheader("Puntaje Final de Productividad")
+        final = resumen.copy()
+        esp = st.session_state.special_tasks.groupby('Técnico')['Puntaje'].sum().reset_index()
+        final = pd.merge(final, esp, on='Técnico', how='left').fillna(0)
+        final['Puntaje Final'] = final['Total Neto'] + final['Puntaje']
+        st.dataframe(final.sort_values(by='Puntaje Final', ascending=False), use_container_width=True, hide_index=True)
+
+else:
+    st.info("Sube un archivo para comenzar el análisis.")
