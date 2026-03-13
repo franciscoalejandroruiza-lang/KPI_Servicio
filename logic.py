@@ -2,7 +2,6 @@ import pandas as pd
 
 def get_data_universe(df, month_name, year, history_months):
     df.columns = df.columns.str.strip()
-    # Intenta convertir la fecha, si falla no detiene el programa
     df['Fecha recepción'] = pd.to_datetime(df['Fecha recepción'], errors='coerce')
     
     months_dict = {
@@ -10,9 +9,7 @@ def get_data_universe(df, month_name, year, history_months):
         "Julio": 7, "Agosto": 8, "Septiembre": 9, "Octubre": 10, "Noviembre": 11, "Diciembre": 12
     }
     
-    month_num = months_dict[month_name]
-    
-    # Rango de fechas
+    month_num = months_dict.get(month_name, 1)
     end_date = pd.Timestamp(year=year, month=month_num, day=1) + pd.offsets.MonthEnd(0)
     start_date_history = (pd.Timestamp(year=year, month=month_num, day=1) - pd.DateOffset(months=history_months))
     start_date_month = pd.Timestamp(year=year, month=month_num, day=1)
@@ -24,17 +21,14 @@ def get_data_universe(df, month_name, year, history_months):
 
 def calculate_penalties(df_history, scores):
     cat_target = ['CORRECTIVO', 'REINCIDENCIA']
-    # Filtrado inicial
     df_penal = df_history[df_history['Categoría'].isin(cat_target)].copy()
     
-    # Excluir personal de Sistemas
     if 'Técnico' in df_penal.columns:
         df_penal = df_penal[~df_penal['Técnico'].str.contains('Sistemas', case=False, na=False)]
     
     if df_penal.empty:
         return pd.DataFrame(columns=['Técnico', 'Penalizaciones'])
 
-    # Lógica de "Última visita"
     df_penal = df_penal.sort_values(by=['N.° de serie', 'Fecha recepción'])
     df_penal['es_ultimo'] = df_penal.groupby('N.° de serie')['Fecha recepción'].transform('max') == df_penal['Fecha recepción']
     
@@ -42,31 +36,23 @@ def calculate_penalties(df_history, scores):
         return 0 if row['es_ultimo'] else scores.get(row['Categoría'], 1.0)
 
     df_penal['Puntos_Penalizacion'] = df_penal.apply(get_points, axis=1)
-    
-    resumen_p = df_penal.groupby('Técnico')['Puntos_Penalizacion'].sum().reset_index()
-    resumen_p.columns = ['Técnico', 'Penalizaciones']
-    return resumen_p
+    return df_penal.groupby('Técnico')['Puntos_Penalizacion'].sum().reset_index().rename(columns={'Puntos_Penalizacion': 'Penalizaciones'})
 
 def get_detailed_penalties(df_history, scores):
-    """Retorna el desglose de qué servicios causaron penalización"""
+    """Extrae el detalle granular para análisis de tendencias de mejora"""
     cat_target = ['CORRECTIVO', 'REINCIDENCIA']
     df_penal = df_history[df_history['Categoría'].isin(cat_target)].copy()
     
     if 'Técnico' in df_penal.columns:
         df_penal = df_penal[~df_penal['Técnico'].str.contains('Sistemas', case=False, na=False)]
     
-    if df_penal.empty:
-        return pd.DataFrame()
+    if df_penal.empty: return pd.DataFrame()
 
     df_penal = df_penal.sort_values(by=['N.° de serie', 'Fecha recepción'])
     df_penal['es_ultimo'] = df_penal.groupby('N.° de serie')['Fecha recepción'].transform('max') == df_penal['Fecha recepción']
     
-    # Filtramos solo lo que NO es último (lo que penaliza)
-    df_detallado = df_penal[df_penal['es_ultimo'] == False].copy()
-    df_detallado['Puntos'] = df_detallado['Categoría'].map(scores)
+    # Registros que causaron la penalización (fueron corregidos después por otro)
+    df_trends = df_penal[df_penal['es_ultimo'] == False].copy()
+    df_trends['Puntos'] = df_trends['Categoría'].map(scores)
     
-    # Seleccionamos solo columnas existentes para evitar errores
-    cols_interes = ['Fecha recepción', 'Técnico', 'N.° de serie', 'Modelo', 'Categoría', 'Puntos']
-    cols_finales = [c for c in cols_interes if c in df_detallado.columns]
-    
-    return df_detallado[cols_finales]
+    return df_trends
