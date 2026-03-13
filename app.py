@@ -62,6 +62,7 @@ if uploaded_file:
                      title=f"Balance: Resueltos en {mes_sel} vs Penalizaciones del Historial", barmode='group')
         st.plotly_chart(fig, use_container_width=True)
 
+    
     # --- PESTAÑA 4: TOP FALLAS (N/S) ---
     with t4:
         st.subheader("Equipos con mayor recurrencia de fallas")
@@ -72,7 +73,48 @@ if uploaded_file:
         
         st.table(top_ns)
         st.plotly_chart(px.bar(top_ns, x='N.° de serie', y='Total Intervenciones', color='Modelo', title="Top 10 Equipos Críticos"))
+# Dentro de app.py, busca la sección de las pestañas:
 
+    # --- PESTAÑA 3: REPORTE DETALLADO (Concentrado de Resueltos) ---
+    with t3:
+        st.subheader(f"Concentrado de Servicios Resueltos - {mes_sel}")
+        # Filtramos solo lo resuelto en el mes actual
+        df_resueltos_det = df_current[df_current['Estatus'] == 'RESUELTA'].copy()
+        
+        if not df_resueltos_det.empty:
+            # Agrupación para ver volumen por técnico
+            resumen_v = df_resueltos_det.groupby('Técnico').size().reset_index(name='Total Resueltos')
+            st.dataframe(resumen_v.sort_values(by='Total Resueltos', ascending=False), use_container_width=True)
+            
+            st.divider()
+            st.write("### Detalle de Folios")
+            st.dataframe(df_resueltos_det[['Fecha recepción', 'Folio', 'Técnico', 'N.° de serie', 'Modelo', 'Falla']], use_container_width=True)
+        else:
+            st.warning("No hay datos de servicios resueltos en este periodo.")
+
+    # --- PESTAÑA 5: PENALIZACIÓN POR TÉCNICOS ---
+    # (Cambiamos el uso de la pestaña 5 que estaba como "Asignación Especial" o creamos una nueva)
+    with t5:
+        st.subheader("Auditoría de Penalizaciones (Historial)")
+        from logic import get_detailed_penalties # Asegúrate de importar o tenerla disponible
+        
+        df_penal_det = get_detailed_penalties(df_history, scores)
+        
+        if not df_penal_det.empty:
+            # Vista agrupada por técnico para ver quién tiene más incidencias
+            agrupado_p = df_penal_det.groupby('Técnico').agg({
+                'N.° de serie': 'count',
+                'Puntos': 'sum'
+            }).rename(columns={'N.° de serie': 'Equipos Reincidentes', 'Puntos': 'Total Penalización'}).reset_index()
+            
+            st.dataframe(agrupado_p.sort_values(by='Total Penalización', ascending=False), use_container_width=True)
+            
+            st.divider()
+            st.write("### Desglose de Equipos que Penalizaron")
+            st.info("Estos equipos fueron atendidos por el técnico, pero volvieron a fallar y fueron cerrados por alguien más después.")
+            st.dataframe(df_penal_det, use_container_width=True)
+        else:
+            st.success("No se encontraron penalizaciones en el periodo seleccionado.")
     # --- PESTAÑA 6: RESULTADO FINAL ---
     with t6:
         st.subheader("Cómputo de Productividad Final")
