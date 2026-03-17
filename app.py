@@ -84,3 +84,37 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# --- LÓGICA DE RESUMEN POR TÉCNICO ---
+st.markdown("---")
+st.subheader("📊 Relación de Desempeño por Técnico")
+
+# Agrupamos para obtener los totales por técnico
+resumen_tecnicos = df_final.groupby('Técnico').agg(
+    Total_Resueltos=('Folio', 'count'),
+    Penalizados=('Es_Reincidente', 'sum')
+).reset_index()
+
+# Calculamos la Efectividad Real
+resumen_tecnicos['Efectividad (%)'] = (
+    (resumen_tecnicos['Total_Resueltos'] - resumen_tecnicos['Penalizados']) / 
+    resumen_tecnicos['Total_Resueltos'] * 100
+).round(1)
+
+# Ordenar por el que tiene más trabajo resuelto
+resumen_tecnicos = resumen_tecnicos.sort_values(by='Total_Resueltos', ascending=False)
+
+# Mostrar la tabla resumen con formato profesional
+st.table(resumen_tecnicos.style.format({'Efectividad (%)': '{:.1f}%'}))
+
+# --- GRÁFICO COMPARATIVO ---
+fig_comparativo = px.bar(
+    resumen_tecnicos, 
+    x='Técnico', 
+    y=['Total_Resueltos', 'Penalizados'],
+    title="Resueltos vs Penalizados por Técnico",
+    barmode='group',
+    color_discrete_map={"Total_Resueltos": "#2ECC71", "Penalizados": "#E74C3C"}
+)
+st.plotly_chart(fig_comparativo, use_container_width=True)
