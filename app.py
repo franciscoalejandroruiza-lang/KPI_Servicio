@@ -84,4 +84,40 @@ def main():
         with m3:
             st.metric("📈 Efectividad Real", f"{efectividad:.1f}%")
         with m4:
-            st.metric("📅 Periodo", f"{meses_nombres[mes_
+            st.metric("📅 Periodo", f"{meses_nombres[mes_sel]}")
+
+        st.markdown("---")
+
+        # --- TABLA DE RELACIÓN POR TÉCNICO ---
+        st.subheader("📊 Relación de Desempeño por Técnico")
+        
+        resumen_tecnicos = df_final.groupby('Técnico').agg(
+            Resueltos=('Folio', 'count'),
+            Penalizados=('Es_Reincidente', 'sum')
+        ).reset_index()
+
+        resumen_tecnicos['Efectividad (%)'] = (
+            (resumen_tecnicos['Resueltos'] - resumen_tecnicos['Penalizados']) / 
+            resumen_tecnicos['Resueltos'] * 100
+        ).round(1)
+
+        resumen_tecnicos = resumen_tecnicos.sort_values(by='Resueltos', ascending=False)
+        
+        # Formato de tabla profesional con barras de color
+        st.dataframe(
+            resumen_tecnicos.style.background_gradient(subset=['Efectividad (%)'], cmap='RdYlGn'),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # --- DETALLE DE FOLIOS ---
+        with st.expander("🔍 Ver detalle de folios y reincidencias"):
+            def color_reincidente(row):
+                return ['background-color: #ffcccc' if row.Es_Reincidente else '' for _ in row]
+            st.dataframe(df_final.style.apply(color_reincidente, axis=1), use_container_width=True)
+
+    else:
+        st.info("👋 Por favor, carga tu archivo de reporte para comenzar el análisis.")
+
+if __name__ == "__main__":
+    main()
