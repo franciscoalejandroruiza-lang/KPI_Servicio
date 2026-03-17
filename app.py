@@ -61,4 +61,29 @@ def main():
                         if str(df_rango.loc[indices[i+1], 'Categoría']).upper() == 'CORRECTIVO':
                             df_rango.loc[indices[i+1], 'Es_Reincidente'] = True
 
-        #
+        # 6. FILTRO FINAL PARA EL REPORTE
+        # Solo mostramos en el resumen los folios que ocurrieron EN EL MES EVALUADO
+        mask_mes_eval = (df_rango['Fecha_DT'].dt.month == mes_eval) & (df_rango['Fecha_DT'].dt.year == anio_eval)
+        df_reporte = df_rango.loc[mask_mes_eval]
+
+        # 7. VISUALIZACIÓN DE RESULTADOS
+        resumen = df_reporte.groupby('Técnico').agg(
+            Resueltos=('Folio', 'count'),
+            Penalizados=('Es_Reincidente', 'sum')
+        ).reset_index()
+        
+        resumen['Efectividad %'] = ((resumen['Resueltos'] - resumen['Penalizados']) / resumen['Resueltos'] * 100).round(1)
+        
+        st.subheader(f"📊 Relación de Desempeño: {meses_dict[mes_eval]} {anio_eval}")
+        st.table(resumen.sort_values('Resueltos', ascending=False))
+
+        with st.expander("Ver detalle de folios analizados (Marcados en rojo las penalizaciones)"):
+            def color_penalizado(row):
+                return ['background-color: #ffcccc' if row.Es_Reincidente else '' for _ in row]
+            st.dataframe(df_reporte.style.apply(color_penalizado, axis=1))
+
+    else:
+        st.info("Carga el archivo para aplicar la lógica de historial.")
+
+if __name__ == "__main__":
+    main()
