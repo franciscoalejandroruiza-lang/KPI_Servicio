@@ -1,67 +1,64 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
-# Configuración básica
-st.set_page_config(page_title="SenAudit - Paso 1", layout="wide")
+st.set_page_config(page_title="SenAudit - Parte 2", layout="wide")
 
 def main():
-    st.title("📊 Paso 1: Conteo de Reportes Resueltos")
+    st.title("📊 Parte 2: Análisis de Reincidencias y Penalizaciones")
     
-    # 1. Cargar Archivo
-    st.sidebar.header("Configuración")
+    st.sidebar.header("Configuración de Auditoría")
     archivo = st.sidebar.file_uploader("Cargar Reporte Excel", type=["xlsx", "csv"])
 
     if archivo:
-        # Leer el archivo
-        if archivo.name.endswith('.csv'):
-            df = pd.read_csv(archivo)
-        else:
-            df = pd.read_excel(archivo, engine='openpyxl')
-
-        # 2. Preparación de Datos (Nombres de columnas exactos de tu archivo)
-        # Convertimos la columna de fecha
+        # 1. Carga de datos
+        df = pd.read_csv(archivo) if archivo.name.endswith('.csv') else pd.read_excel(archivo, engine='openpyxl')
+        
+        # Limpieza y conversión de fechas
         df['Fecha_DT'] = pd.to_datetime(df['Última visita'], errors='coerce')
+        df = df.dropna(subset=['Fecha_DT', 'Folio', 'N.° de serie'])
+
+        # 2. Configuración de Rango de fechas
+        meses_dict = {1:"Enero", 2:"Febrero", 3:"Marzo", 4:"Abril", 5:"Mayo", 6:"Junio",
+                      7:"Julio", 8:"Agosto", 9:"Septiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"}
         
-        # 3. Filtros en Sidebar
-        meses_dict = {
-            1:"Enero", 2:"Febrero", 3:"Marzo", 4:"Abril", 5:"Mayo", 6:"Junio",
-            7:"Julio", 8:"Agosto", 9:"Septiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"
-        }
+        col1, col2 = st.sidebar.columns(2)
+        mes_eval = col1.selectbox("Mes a evaluar", options=range(1, 13), format_func=lambda x: meses_dict[x], index=1)
+        anio_eval = col2.number_input("Año", value=2026)
         
-        mes_sel = st.sidebar.selectbox("Selecciona el Mes", options=range(1, 13), format_func=lambda x: meses_dict[x], index=1) # Default Febrero
-        anio_sel = st.sidebar.number_input("Año", value=2026)
+        # AQUÍ ESTÁ TU APARTADO:
+        meses_atras = st.sidebar.slider("Meses de historial hacia atrás", 0, 6, 3)
+        dias_ventana = st.sidebar.number_input("Días para reincidencia", value=15)
 
-        # 4. FILTRADO CRÍTICO
-        # Filtramos por Año, Mes y Estatus "RESUELTA"
-        mask = (df['Fecha_DT'].dt.month == mes_sel) & \
-               (df['Fecha_DT'].dt.year == anio_sel) & \
-               (df['Estatus'].str.upper() == 'RESUELTA')
-        
-        # Aplicamos filtro y eliminamos duplicados de Folio para que el conteo sea real
-        df_mes = df.loc[mask].copy().drop_duplicates(subset=['Folio'])
+        # 3. Cálculo de Fechas
+        # Fecha fin: último día del mes seleccionado
+        fecha_fin = datetime(anio_eval, mes_eval, 1) + relativedelta(months=1) - relativedelta(days=1)
+        # Fecha inicio: N meses atrás desde el inicio del mes seleccionado
+        fecha_inicio = datetime(anio_eval, mes_eval, 1) - relativedelta(months=meses_atras)
 
-        # 5. MOSTRAR RESULTADOS
-        st.subheader(f"Reportes Resueltos en {meses_dict[mes_sel]} {anio_sel}")
-        
-        # Métricas generales
-        total_resueltos = len(df_mes)
-        st.metric("Total de Reportes Resueltos (Neto)", total_resueltos)
+        st.sidebar.info(f"Analizando desde: {fecha_inicio.strftime('%d/%m/%Y')} hasta: {fecha_fin.strftime('%d/%m/%Y')}")
 
-        # Relación por Técnico
-        st.markdown("### Resumen por Técnico")
-        resumen_tecnicos = df_mes.groupby('Técnico').agg(
-            Reportes_Resueltos=('Folio', 'count')
-        ).reset_index().sort_values(by='Reportes_Resueltos', ascending=False)
+        # 4. Filtrado de Datos
+        # Filtramos todo el rango para buscar reincidencias
+        mask_rango = (df['Fecha_DT'] >= pd.Timestamp(fecha_inicio)) & (df['Fecha_DT'] <= pd.Timestamp(fecha_fin))
+        df_rango = df.loc[mask_rango].copy().drop_duplicates(subset=['Folio'])
 
-        st.table(resumen_tecnicos)
+        # 5. LÓGICA DE PENALIZACIÓN
+        df_rango['Es_Reincidente'] = False
+        # Ordenamos por serie y fecha (reciente primero)
+        df_rango = df_rango.sort_values(['N.° de serie', 'Fecha_DT'], ascending=[True, False])
 
-        # Mostrar los datos para verificar
-        with st.expander("Ver listado completo de este mes"):
-            st.write(df_mes[['Folio', 'N.° de serie', 'Técnico', 'Última visita', 'Estatus', 'Categoría']])
+        for serie, grupo in df_rango.groupby('N.° de serie'):
+            if len(grupo) > 1:
+                indices = grupo.index
+                for i in range(len(indices) - 1):
+                    # Comparamos reporte actual (i) con el anterior en el tiempo (i+1)
+                    diff = (df_rango.loc[indices[i], 'Fecha_DT'] - df_rango.loc[indices[i+1], 'Fecha_DT']).days
+                    
+                    if diff <= dias_ventana:
+                        # REGLA: Solo penaliza si el anterior era CORRECTIVO
+                        if str(df_rango.loc[indices[i+1], 'Categoría']).upper() == 'CORRECTIVO':
+                            df_rango.loc[indices[i+1], 'Es_Reincidente'] = True
 
-    else:
-        st.info("Por favor, carga el archivo Excel para comenzar.")
-
-if __name__ == "__main__":
-    main()
+        #
