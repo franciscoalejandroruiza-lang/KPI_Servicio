@@ -29,24 +29,22 @@ def main():
         ventana_meses = st.sidebar.slider("Meses previos para historial", 0, 6, 3)
         dias_reincidencia = st.sidebar.number_input("Días para considerar reincidencia", value=15)
 
-        # --- PROCESAMIENTO SENIOR ---
-        # 1. Normalización de fechas y limpieza
+        # --- PROCESAMIENTO ---
         df_raw['Fecha'] = pd.to_datetime(df_raw['Última visita'], errors='coerce')
         df_raw = df_raw.dropna(subset=['Fecha', 'Folio', 'N.° de serie'])
         
-        # 2. Definir rango (Ej: Febrero + 3 meses atrás)
+        # Definir rango
         fecha_fin = datetime(anio_sel, mes_sel, 1) + relativedelta(months=1) - relativedelta(days=1)
         fecha_inicio = datetime(anio_sel, mes_sel, 1) - relativedelta(months=ventana_meses)
         
-        # 3. FILTRO MAESTRO (Solo RESUELTAS en el rango)
-        # Esto asegura que si Alejandro tuvo 105 resueltas, solo aparezcan esas 105.
+        # Filtro: Solo RESUELTA y Deduplicación de Folios
         mask = (df_raw['Fecha'] >= pd.Timestamp(fecha_inicio)) & \
                (df_raw['Fecha'] <= pd.Timestamp(fecha_fin)) & \
                (df_raw['Estatus'].str.upper() == 'RESUELTA')
         
         df_final = df_raw.loc[mask].copy().drop_duplicates(subset=['Folio'])
 
-        # 4. LÓGICA DE PENALIZACIÓN
+        # Lógica de Penalización (Solo Correctivos)
         df_final['Es_Reincidente'] = False
         df_final = df_final.sort_values(['N.° de serie', 'Fecha'], ascending=[True, False])
 
@@ -54,67 +52,59 @@ def main():
             if len(grupo) > 1:
                 indices = grupo.index
                 for i in range(len(indices) - 1):
-                    # Comparamos el actual (i) con el anterior (i+1)
                     diff = (df_final.loc[indices[i], 'Fecha'] - df_final.loc[indices[i+1], 'Fecha']).days
-                    
-                    # REGLA: Si están cerca Y el anterior era CORRECTIVO, se penaliza el anterior
                     if diff <= dias_reincidencia:
                         if df_final.loc[indices[i+1], 'Categoría'].upper() == 'CORRECTIVO':
                             df_final.loc[indices[i+1], 'Es_Reincidente'] = True
 
-        # --- VISUALIZACIÓN ---
+        # --- MÉTRICAS GENERALES ---
         resueltos_netos = len(df_final)
-        penalizados = df_final['Es_Reincidente'].sum()
+        penalizados_total = df_final['Es_Reincidente'].sum()
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Reportes Resueltos", resueltos_netos)
-        c2.metric("Penalizados (Correctivos)", int(penalizados), delta_color="inverse")
-        c3.metric("Efectividad", f"{( (resueltos_netos - penalizados) / resueltos_netos * 100 if resueltos_netos > 0 else 0):.1f}%")
+        c1.metric("Total Reportes Resueltos", resueltos_netos)
+        c2.metric("Total Penalizados", int(penalizados_total), delta_color="inverse")
+        c3.metric("Efectividad Global", f"{( (resueltos_netos - penalizados_total) / resueltos_netos * 100 if resueltos_netos > 0 else 0):.1f}%")
 
-        st.subheader(f"Listado de Auditoría: {meses_nombres[mes_sel]} {anio_sel}")
+        # --- RELACIÓN POR TÉCNICO (Lo que solicitaste) ---
+        st.markdown("---")
+        st.subheader(f"📊 Relación de Desempeño por Técnico - {meses_nombres[mes_sel]}")
         
-        # Pintar la tabla: Rojo si es reincidente
+        resumen_tecnicos = df_final.groupby('Técnico').agg(
+            Total_Resueltos=('Folio', 'count'),
+            Penalizados=('Es_Reincidente', 'sum')
+        ).reset_index()
+
+        resumen_tecnicos['Efectividad (%)'] = (
+            (resumen_tecnicos['Total_Resueltos'] - resumen_tecnicos['Penalizados']) / 
+            resumen_tecnicos['Total_Resueltos'] * 100
+        ).round(1)
+
+        resumen_tecnicos = resumen_tecnicos.sort_values(by='Total_Resueltos', ascending=False)
+        
+        # Mostrar tabla resumen
+        st.dataframe(resumen_tecnicos.style.format({'Efectividad (%)': '{:.1f}%'}), use_container_width=True)
+
+        # Gráfico Comparativo
+        fig_comparativo = px.bar(
+            resumen_tecnicos, 
+            x='Técnico', 
+            y=['Total_Resueltos', 'Penalizados'],
+            title="Resueltos vs Penalizados por Técnico",
+            barmode='group',
+            color_discrete_map={"Total_Resueltos": "#2ECC71", "Penalizados": "#E74C3C"}
+        )
+        st.plotly_chart(fig_comparativo, use_container_width=True)
+
+        # --- DETALLE INDIVIDUAL ---
+        st.markdown("---")
+        st.subheader("📋 Detalle Individual de Folios")
         def highlight_reincidencia(row):
             return ['background-color: #ffcccc' if row.Es_Reincidente else '' for _ in row]
-
         st.dataframe(df_final.style.apply(highlight_reincidencia, axis=1), use_container_width=True)
 
     else:
-        st.info("Esperando archivo... Por favor, carga el reporte de órdenes de servicio en el panel de la izquierda.")
+        st.info("Carga el archivo para ver la relación por técnico.")
 
 if __name__ == "__main__":
     main()
-
-
-# --- LÓGICA DE RESUMEN POR TÉCNICO ---
-st.markdown("---")
-st.subheader("📊 Relación de Desempeño por Técnico")
-
-# Agrupamos para obtener los totales por técnico
-resumen_tecnicos = df_final.groupby('Técnico').agg(
-    Total_Resueltos=('Folio', 'count'),
-    Penalizados=('Es_Reincidente', 'sum')
-).reset_index()
-
-# Calculamos la Efectividad Real
-resumen_tecnicos['Efectividad (%)'] = (
-    (resumen_tecnicos['Total_Resueltos'] - resumen_tecnicos['Penalizados']) / 
-    resumen_tecnicos['Total_Resueltos'] * 100
-).round(1)
-
-# Ordenar por el que tiene más trabajo resuelto
-resumen_tecnicos = resumen_tecnicos.sort_values(by='Total_Resueltos', ascending=False)
-
-# Mostrar la tabla resumen con formato profesional
-st.table(resumen_tecnicos.style.format({'Efectividad (%)': '{:.1f}%'}))
-
-# --- GRÁFICO COMPARATIVO ---
-fig_comparativo = px.bar(
-    resumen_tecnicos, 
-    x='Técnico', 
-    y=['Total_Resueltos', 'Penalizados'],
-    title="Resueltos vs Penalizados por Técnico",
-    barmode='group',
-    color_discrete_map={"Total_Resueltos": "#2ECC71", "Penalizados": "#E74C3C"}
-)
-st.plotly_chart(fig_comparativo, use_container_width=True)
