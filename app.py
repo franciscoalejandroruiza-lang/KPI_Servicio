@@ -1,86 +1,197 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from logic import get_data_universe, calculate_penalties, get_detailed_penalties
+from datetime import datetime
+import io
 
-st.set_page_config(page_title="SenAudit Pro", layout="wide")
+# ==========================================
+# CONFIGURACIÓN DE PÁGINA Y ESTILO
+# ==========================================
+st.set_page_config(page_title="Analizador Técnico Pro", layout="wide")
 
-# Estado para asignaciones extra
-if 'extra_points' not in st.session_state:
-    st.session_state.extra_points = pd.DataFrame(columns=['Técnico', 'Motivo', 'Puntos'])
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    """, unsafe_allow_html=True)
 
-st.title("📊 Auditoría de Servicio Técnico")
+# ==========================================
+# FUNCIONES DE PROCESAMIENTO (LÓGICA)
+# ==========================================
 
-uploaded_file = st.sidebar.file_uploader("Subir Reporte de Órdenes", type=['csv', 'xlsx'])
+def clean_data(df):
+    """Normalización de columnas y limpieza de tipos de datos."""
+    # 1. Normalizar nombres de columnas (strip, lower, quitar puntos/acentos básicos)
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_').str.replace('.', '', regex=False).str.replace('°', '')
+    
+    # 2. Mapeo de columnas críticas
+    mapping = {
+        'n_de_serie': 'serie',
+        'ultima_visita': 'fecha',
+        'tecnico': 'tecnico',
+        'categoria': 'categoria',
+        'estatus': 'estatus',
+        'problema_reportado': 'problema'
+    }
+    df = df.rename(columns=mapping)
+    
+    # Validar columnas mínimas requeridas
+    required = ['serie', 'fecha', 'tecnico', 'categoria', 'estatus']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Faltan columnas críticas en el archivo: {missing}")
+        return None
+
+    # 3. Limpieza de tipos
+    df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+    df = df.dropna(subset=['serie', 'fecha'])
+    
+    # 4. Estandarizar texto
+    df['tecnico'] = df['tecnico'].astype(str).str.upper().str.strip()
+    df['categoria'] = df['categoria'].astype(str).str.upper().str.strip()
+    df['estatus'] = df['estatus'].astype(str).str.upper().str.strip()
+    df['problema'] = df['problema'].astype(str).str.upper().fill_na("SIN REPORTE")
+    
+    return df
+
+def apply_filters(df, selected_date, lookback_months):
+    """Aplica ventana temporal dinámica."""
+    end_date = pd.to_datetime(selected_date) + pd.offsets.MonthEnd(0)
+    start_date = pd.to_datetime(selected_date) - pd.DateOffset(months=lookback_months)
+    
+    mask = (df['fecha'] >= start_date) & (df['fecha'] <= end_date)
+    return df.loc[mask].sort_values(by=['serie', 'fecha'])
+
+def calculate_penalties(df):
+    """Lógica de reincidencias: Solo penaliza historial previo en CORRECTIVO."""
+    df = df.sort_values(['serie', 'fecha'])
+    # Identificar la última visita por serie
+    df['es_ultima'] = df.groupby('serie')['fecha'].transform('max') == df['fecha']
+    
+    # Penalización: Si es CORRECTIVO y NO es la última intervención de ese equipo en el periodo
+    df['penalizable'] = (df['categoria'] == 'CORRECTIVO') & (~df['es_ultima'])
+    return df
+
+# ==========================================
+# SIDEBAR / CONFIGURACIÓN
+# ==========================================
+with st.sidebar:
+    st.title("⚙️ Panel de Control")
+    uploaded_file = st.file_uploader("Cargar Reporte (Excel)", type=["xlsx", "xls"])
+    
+    st.divider()
+    
+    col_date1, col_date2 = st.columns(2)
+    with col_date1:
+        mes = st.selectbox("Mes de Análisis", range(1, 13), index=datetime.now().month - 1)
+    with col_date2:
+        anio = st.number_input("Año", value=2024)
+    
+    lookback = st.slider("Meses de historial (reincidencias)", 1, 12, 3)
+    
+    st.subheader("💰 Valores por Categoría")
+    config_data = pd.DataFrame({
+        "Categoria": ["CORRECTIVO", "PREVENTIVO", "INSTALACION", "OTROS"],
+        "Valor_Puntos": [1.0, 1.5, 2.0, 0.5]
+    })
+    editable_config = st.data_editor(config_data, num_rows="dynamic", use_container_width=True)
+
+# ==========================================
+# CUERPO PRINCIPAL
+# ==========================================
+st.title("📊 Dashboard de Rendimiento Técnico")
 
 if uploaded_file:
-    df_raw = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-    
-    tabs = st.tabs(["⚙️ Configuración", "📈 Resumen", "📋 Detalle Categorías", "⚠️ Penalizaciones", "🔍 Top Fallas", "🏆 Asignación Extra"])
-
-    # 1. CONFIGURACIÓN
-    with tabs[0]:
-        c1, c2, c3 = st.columns(3)
-        mes = c1.selectbox("Mes a revisar", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"], index=2)
-        anio = c2.selectbox("Año", [2025, 2026], index=1)
-        meses_h = c3.number_input("Meses de historial (Reincidencias)", 0, 12, 1)
+    try:
+        raw_df = pd.read_excel(uploaded_file)
+        df = clean_data(raw_df)
         
-        st.divider()
-        st.write("### Valor de Penalización por Categoría")
-        col_p1, col_p2 = st.columns(2)
-        v_corr = col_p1.number_input("Puntos Correctivo", 0.0, 5.0, 1.0)
-        v_rein = col_p2.number_input("Puntos Reincidencia", 0.0, 5.0, 1.0)
-        scores = {"CORRECTIVO": v_corr, "REINCIDENCIA": v_rein}
-        
-        df_hist, df_curr = get_data_universe(df_raw, mes, anio, meses_h)
-
-    # 2. RESUMEN POR TÉCNICO
-    with tabs[1]:
-        resueltos = df_curr[df_curr['Estatus'] == 'RESUELTA'].groupby('Técnico').size().reset_index(name='Resueltos')
-        penales = calculate_penalties(df_hist, scores)
-        resumen = pd.merge(resueltos, penales, on='Técnico', how='outer').fillna(0)
-        resumen['Neto'] = resumen['Resueltos'] - resumen['Penalizaciones']
-        st.dataframe(resumen.sort_values(by='Neto', ascending=False), use_container_width=True, hide_index=True)
-
-    # 3. REPORTE DETALLADO (CATEGORÍAS)
-    with tabs[2]:
-        st.write(f"### Categorías Resueltas en {mes}")
-        df_cat = df_curr[df_curr['Estatus'] == 'RESUELTA'].copy()
-        pivot_cat = df_cat.groupby(['Técnico', 'Categoría']).size().unstack(fill_value=0)
-        st.dataframe(pivot_cat, use_container_width=True)
-
-    # 4. PENALIZACIONES POR TÉCNICO (AUDITORÍA)
-    with tabs[3]:
-        df_penal_det = get_detailed_penalties(df_hist, scores)
-        if not df_penal_det.empty:
-            tecnicos = ["Todos"] + sorted(df_penal_det['Técnico'].unique().tolist())
-            tec_sel = st.selectbox("Filtrar técnico:", tecnicos)
-            df_view = df_penal_det if tec_sel == "Todos" else df_penal_det[df_penal_det['Técnico'] == tec_sel]
+        if df is not None:
+            # Procesamiento
+            selected_period = datetime(anio, mes, 1)
+            df_filtered = apply_filters(df, selected_period, lookback)
+            df_processed = calculate_penalties(df_filtered)
             
-            cols_show = ['Fecha recepción', 'Folio', 'N.° de serie', 'Nombre comercial', 'Categoría', 'Puntos_R']
-            exist_cols = [c for c in cols_show if c in df_view.columns]
-            st.dataframe(df_view[exist_cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Sin penalizaciones en el rango configurado.")
+            # Pestañas
+            t1, t2, t3, t4, t5 = st.tabs([
+                "🏆 Resultados Finales", 
+                "⚠️ Top Fallas", 
+                "📉 Penalizaciones", 
+                "📋 Asignaciones", 
+                "⚙️ Config"
+            ])
 
-    # 5. TOP FALLA (MODA N/S)
-    with tabs[4]:
-        st.write(f"### Equipos con más reportes en {mes}")
-        top_ns = df_curr.groupby(['N.° de serie', 'Modelo', 'Nombre comercial']).size().reset_index(name='Frecuencia')
-        st.table(top_ns.sort_values(by='Frecuencia', ascending=False).head(10))
+            # --- PESTAÑA 1: RESULTADOS ---
+            with t1:
+                st.subheader(f"Resumen de Desempeño - {selected_period.strftime('%B %Y')}")
+                
+                # Agrupación por técnico
+                resueltas = df_processed[df_processed['estatus'] == 'RESUELTA'].groupby('tecnico').size().rename('resueltas')
+                penalizaciones = df_processed[df_processed['penalizable']].groupby('tecnico').size().rename('penalizaciones')
+                
+                resumen = pd.merge(resueltas, penalizaciones, on='tecnico', how='left').fillna(0)
+                
+                # Unir con valores de configuración para el Score Total
+                # (Simplificado: Resueltas * 1 - Penalizaciones * Factor)
+                resumen['Total_Score'] = resumen['resueltas'] - resumen['penalizaciones']
+                
+                st.dataframe(resumen.sort_values(by='Total_Score', ascending=False), use_container_width=True)
+                
+                fig_res = px.bar(resumen.reset_index(), x='tecnico', y=['resueltas', 'penalizaciones'], 
+                                 title="Actividad vs Penalizaciones", barmode='group')
+                st.plotly_chart(fig_res, use_container_width=True)
 
-    # 6. ASIGNACIÓN EXTRA
-    with tabs[5]:
-        with st.form("extra_form"):
-            t_extra = st.selectbox("Técnico", df_raw['Técnico'].unique())
-            m_extra = st.text_input("Motivo")
-            p_extra = st.number_input("Puntos", -10.0, 10.0, 1.0)
-            if st.form_submit_button("Asignar Puntos"):
-                new_row = pd.DataFrame([{'Técnico': t_extra, 'Motivo': m_extra, 'Puntos': p_extra}])
-                st.session_state.extra_points = pd.concat([st.session_state.extra_points, new_row], ignore_index=True)
-        
-        st.write("### Registro de Puntos Extra")
-        st.dataframe(st.session_state.extra_points, use_container_width=True)
+            # --- PESTAÑA 2: TOP FALLAS ---
+            with t2:
+                st.subheader("Análisis de Fallas Recurrentes")
+                top_fallas = df_processed['problema'].value_counts().reset_index()
+                top_fallas.columns = ['Problema', 'Frecuencia']
+                
+                col_f1, col_f2 = st.columns([1, 2])
+                with col_f1:
+                    st.dataframe(top_fallas, use_container_width=True)
+                with col_f2:
+                    fig_fallas = px.pie(top_fallas.head(10), values='Frecuencia', names='Problema', hole=0.4)
+                    st.plotly_chart(fig_fallas, use_container_width=True)
 
+            # --- PESTAÑA 3: PENALIZACIONES ---
+            with t3:
+                st.subheader("Detalle de Reincidencias (Correctivos)")
+                df_pen = df_processed[df_processed['penalizable']]
+                st.write("Se consideran penalizaciones las visitas a equipos 'CORRECTIVOS' que ya habían sido visitados en el periodo de ventana.")
+                st.dataframe(df_pen[['tecnico', 'serie', 'fecha', 'problema']], use_container_width=True)
+                
+                if not df_pen.empty:
+                    csv = df_pen.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Descargar Reporte Penalizaciones", csv, "penalizaciones.csv", "text/csv")
+
+            # --- PESTAÑA 4: ASIGNACIONES ESPECIALES ---
+            with t4:
+                st.subheader("Actividades No Correctivas")
+                especiales = df_processed[df_processed['categoria'] != 'CORRECTIVO']
+                st.table(especiales[['tecnico', 'categoria', 'fecha', 'estatus']].head(20))
+
+            # --- PESTAÑA 5: CONFIGURACIÓN ---
+            with t5:
+                st.info("La configuración de pesos afecta el cálculo de la pestaña 'Resultados Finales'.")
+                st.write("Categorías detectadas en el archivo:")
+                st.write(df['categoria'].unique())
+
+    except Exception as e:
+        st.error(f"Error procesando el archivo: {str(e)}")
 else:
-    st.info("Sube el archivo Excel para procesar los indicadores.")
+    st.info("👋 Por favor, carga un archivo Excel en la barra lateral para comenzar.")
+    st.markdown("""
+    ### Requisitos del Formato:
+    - **N.° de serie**: Identificador del equipo.
+    - **Última visita**: Fecha (DD/MM/YYYY).
+    - **Técnico**: Nombre del responsable.
+    - **Categoría**: (Ej: CORRECTIVO, PREVENTIVO).
+    - **Estatus**: (Ej: RESUELTA, PENDIENTE).
+    """)
+
+# Conclusión del flujo
+if uploaded_file:
+    st.divider()
+    st.caption(f"Generado el: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
