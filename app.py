@@ -20,7 +20,7 @@ def main():
         df.columns = df.columns.str.strip()
 
         df['Fecha_DT'] = pd.to_datetime(df['Última visita'], errors='coerce')
-        df = df.dropna(subset=['Fecha_DT', 'Folio', 'N.° de equipo'])
+        df = df.dropna(subset=['Fecha_DT', 'Folio', 'N.° de serie'])
 
         # DEBUG
         st.sidebar.write("📊 Registros:", len(df))
