@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="SenAudit Pro - Reporte Mensual", layout="wide")
+st.set_page_config(page_title="SenAudit Pro - Validación Exacta", layout="wide")
 
 def main():
-    st.title("🛡️ Auditoría SenAudit Pro")
-    st.markdown("Análisis de **Correctivos Resueltos** con historial de reincidencia.")
+    st.title("🛡️ Auditoría SenAudit Pro: Validación de Datos")
+    st.markdown("Comparación de folios reincidentes para técnicos de campo.")
 
     archivo = st.sidebar.file_uploader("Subir Reporte de Servicio (.xlsx)", type=["xlsx"])
 
     if archivo:
         try:
-            # Carga de datos
+            # 1. Carga y Normalización TOTAL
             df = pd.read_excel(archivo, engine='openpyxl')
             df.columns = df.columns.str.strip()
             
@@ -20,85 +20,80 @@ def main():
             col_fecha = 'Fecha recepción' if 'Fecha recepción' in df.columns else 'Última visita'
             col_serie = 'N.° de serie' if 'N.° de serie' in df.columns else 'N.° de equipo'
             
-            # Limpieza de fechas (tz-naive para evitar conflictos)
+            # Limpieza agresiva de datos
             df['Fecha_DT'] = pd.to_datetime(df[col_fecha], errors='coerce').dt.tz_localize(None)
+            df['Técnico'] = df['Técnico'].str.strip().str.upper() # Evita errores por minúsculas/espacios
             
-            # Filtro: Solo Correctivos y Resueltas
+            # 2. El Filtro que definimos: Solo Correctivos Resueltos
+            # NOTA: Si tus 89 penalizaciones incluyen 'Preventivos', quita este filtro.
             df_valido = df[
                 (df['Categoría'].str.contains('CORRECTIVO', case=False, na=False)) & 
                 (df['Estatus'].str.contains('RESUELTA', case=False, na=False))
             ].copy()
 
-            if df_valido.empty:
-                st.warning("No hay registros que coincidan con 'CORRECTIVO' y 'RESUELTA'.")
-                return
-
-            # --- CONFIGURACIÓN EN BARRA LATERAL ---
-            st.sidebar.header("Configuración")
+            # --- CONFIGURACIÓN ---
             dias_garantia = st.sidebar.slider("Días de garantía para reincidencia", 1, 365, 30)
-            
-            # Listado de meses por nombre
             meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-            
-            mes_nombre_sel = st.sidebar.selectbox("Selecciona el Mes a consultar", meses_nombres, 
-                                                  index=datetime.now().month - 1)
-            mes_num_sel = meses_nombres.index(mes_nombre_sel) + 1
-            anio_eval = st.sidebar.number_input("Año", value=2026)
+            mes_sel = st.sidebar.selectbox("Mes a consultar", meses_nombres, index=datetime.now().month - 1)
+            mes_num = meses_nombres.index(mes_sel) + 1
 
-            # --- LÓGICA DE PENALIZACIÓN ---
-            # Ordenamos por serie y fecha
+            # 3. Lógica de Penalización (Barrido por Serie)
             df_valido = df_valido.sort_values([col_serie, 'Fecha_DT'], ascending=True)
             df_valido['Es_Penalizacion'] = 0
-            df_valido['Dias_Diff'] = 0
+            df_valido['Días_Transcurridos'] = 0
+            df_valido['Folio_Siguiente'] = ""
 
             for serie, grupo in df_valido.groupby(col_serie):
                 if len(grupo) > 1:
+                    # Analizamos todas las visitas de la máquina
                     for i in range(len(grupo) - 1):
                         idx_actual = grupo.index[i]
-                        idx_siguiente = grupo.index[i+1]
+                        idx_sig = grupo.index[i+1]
                         
-                        dif = (df_valido.loc[idx_siguiente, 'Fecha_DT'] - df_valido.loc[idx_actual, 'Fecha_DT']).days
+                        dif = (df_valido.loc[idx_sig, 'Fecha_DT'] - df_valido.loc[idx_actual, 'Fecha_DT']).days
                         
+                        # Si vuelve a fallar dentro del rango, se penaliza al técnico actual
                         if 0 <= dif <= dias_garantia:
                             df_valido.at[idx_actual, 'Es_Penalizacion'] = 1
-                            df_valido.at[idx_actual, 'Dias_Diff'] = dif
+                            df_valido.at[idx_actual, 'Días_Transcurridos'] = dif
+                            df_valido.at[idx_actual, 'Folio_Siguiente'] = df_valido.loc[idx_sig, 'Folio']
 
-            # --- FILTRADO PARA EL REPORTE ---
-            df_mes = df_valido[(df_valido['Fecha_DT'].dt.month == mes_num_sel) & 
-                               (df_valido['Fecha_DT'].dt.year == anio_eval)].copy()
+            # 4. Resultados del Mes
+            df_mes = df_valido[df_valido['Fecha_DT'].dt.month == mes_num].copy()
 
-            # --- INTERFAZ DE RESULTADOS ---
-            c1, c2 = st.columns(2)
-            
+            # --- VISUALIZACIÓN ---
+            c1, c2 = st.columns([1, 1])
             with c1:
-                st.subheader(f"Resumen de Técnicos: {mes_nombre_sel}")
+                st.subheader(f"Resumen {mes_sel}")
                 resumen = df_mes.groupby('Técnico').agg(
-                    Correctivos_Totales=('Folio', 'count'),
+                    Total_Correctivos=('Folio', 'count'),
                     Penalizaciones=('Es_Penalizacion', 'sum')
                 ).reset_index()
-                resumen['Efectividad %'] = ((resumen['Correctivos_Totales'] - resumen['Penalizaciones']) / resumen['Correctivos_Totales'] * 100).round(1)
-                st.dataframe(resumen.sort_values('Penalizaciones', ascending=False), use_container_width=True, hide_index=True)
+                st.dataframe(resumen.sort_values('Penalizaciones', ascending=False), use_container_width=True)
 
             with c2:
-                st.subheader("Gráfico de Penalizaciones")
-                if not resumen.empty:
-                    st.bar_chart(resumen.set_index('Técnico')['Penalizaciones'])
+                # Buscador específico para Alejandro o cualquier técnico
+                st.subheader("🔎 Auditor de Técnico Específico")
+                tecnico_buscado = st.text_input("Escribe el nombre del técnico para validar sus 89 folios:", "ALEJANDRO RUIZ").upper()
+                
+                if tecnico_buscado:
+                    detalles = df_mes[df_mes['Técnico'].str.contains(tecnico_buscado, na=False)]
+                    total_pen = detalles['Es_Penalizacion'].sum()
+                    st.metric(f"Penalizaciones de {tecnico_buscado}", total_pen)
+                    
+                    if total_pen != 89:
+                        st.warning(f"El sistema cuenta {total_pen}. Si tú cuentas 89, revisa si estás contando folios que no son 'Correctivos' o que pasan los {dias_garantia} días.")
 
             st.divider()
-            st.subheader(f"🔍 Detalle de Reincidencias en {mes_nombre_sel}")
-            evidencia = df_mes[df_mes['Es_Penalizacion'] == 1]
-            
-            if not evidencia.empty:
-                cols_finales = ['Folio', 'Técnico', col_serie, 'Fecha_DT', 'Dias_Diff']
-                st.dataframe(evidencia[cols_finales].rename(columns={'Dias_Diff': 'Días p/ reincidir'}), use_container_width=True)
-            else:
-                st.success(f"Excelente: No se detectaron reincidencias en el mes de {mes_nombre_sel}.")
+            st.subheader("📋 Evidencia Detallada (Para conciliación)")
+            st.write("Esta tabla muestra folio por folio por qué se aplicó la penalización:")
+            st.dataframe(df_mes[df_mes['Es_Penalizacion'] == 1][[col_serie, 'Folio', 'Técnico', 'Fecha_DT', 'Días_Transcurridos', 'Folio_Siguiente']], use_container_width=True)
 
         except Exception as e:
-            st.error(f"Error al procesar el Excel: {e}")
+            st.error(f"Error: {e}")
     else:
-        st.info("👈 Por favor, carga el reporte en Excel para generar la auditoría mensual.")
+        st.info("Carga el archivo para auditar los folios.")
 
 if __name__ == "__main__":
     main()
