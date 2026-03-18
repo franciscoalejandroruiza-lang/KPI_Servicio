@@ -2,4 +2,4 @@ streamlit>=1.35.0
 pandas>=2.0.0
 openpyxl
 plotly
-altair<5.0.0
+matplotlib
