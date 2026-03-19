@@ -3,10 +3,10 @@ import pandas as pd
 from datetime import datetime
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="SenAudit Pro - Configuración de Auditoría", layout="wide")
+st.set_page_config(page_title="SenAudit Pro - Filtro Dinámico", layout="wide")
 
 def main():
-    st.title("🛡️ SenAudit Pro: Auditoría Personalizada")
+    st.title("🛡️ SenAudit Pro: Control de Productividad y Garantía")
     
     # --- BARRA LATERAL ---
     st.sidebar.header("📂 Carga de Datos")
@@ -27,78 +27,68 @@ def main():
             df = df.dropna(subset=['Fecha_DT', col_serie])
 
             # --- SELECTOR DE MES CONFIGURABLE ---
-            st.sidebar.header("⚙️ Configuración de Vista")
+            st.sidebar.header("⚙️ Configuración del Mes")
             meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
             
-            # El usuario elige qué mes quiere auditar
-            mes_sel = st.sidebar.selectbox("Selecciona el Mes a Auditar:", meses_nombres, index=1)
+            # El usuario elige el mes que quiere auditar/ver
+            mes_sel = st.sidebar.selectbox("Selecciona el Mes:", meses_nombres, index=1)
             anio_sel = st.sidebar.number_input("Año:", value=2026)
             mes_num = meses_nombres.index(mes_sel) + 1
 
-            # --- LÓGICA DE GARANTÍA (3 MESES) ---
+            # --- LÓGICA DE AUDITORÍA ---
             df = df.sort_values([col_serie, 'Fecha_DT'], ascending=True)
-
-            # Identificar quién estuvo antes en la máquina (Garantía)
             df['Tecnico_Ant'] = df.groupby(col_serie)['Técnico'].shift(1)
             df['Fecha_Ant'] = df.groupby(col_serie)['Fecha_DT'].shift(1)
-            df['Folio_Ant'] = df.groupby(col_serie)['Folio'].shift(1)
             df['Estatus_Ant'] = df.groupby(col_serie)['Estatus'].shift(1)
             df['Dias_Garantia'] = (df['Fecha_DT'] - df['Fecha_Ant']).dt.days
 
-            # Regla: Penaliza al anterior si hoy es Correctivo y pasaron <= 90 días
+            # Penalización: Correctivo hoy + Resuelta antes + <= 90 días
             es_falla_hoy = df['Categoría'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
             fue_resuelta_ant = df['Estatus_Ant'].astype(str).str.upper().str.contains('RESUELTA', na=False)
-            penalizacion = (es_falla_hoy & fue_resuelta_ant & (df['Dias_Garantia'] <= 90)).astype(int)
-            df['Es_Penalizacion'] = penalizacion
+            df['Es_Penalizacion'] = (es_falla_hoy & fue_resuelta_ant & (df['Dias_Garantia'] <= 90)).astype(int)
 
             # --- PESTAÑAS ---
             tab_general, tab_auditoria = st.tabs(["📊 Resumen Mensual", "🔍 Auditoría de Reincidencias"])
 
             with tab_general:
-                # Filtrar solo resueltos del año para la matriz
-                df_res = df[(df['Estatus'].str.contains('RESUELTA', case=False)) & (df['Fecha_DT'].dt.year == anio_sel)]
-                matriz = df_res.pivot_table(index='Técnico', columns=df_res['Fecha_DT'].dt.month, values='Folio', aggfunc='count', fill_value=0)
-                matriz = matriz.rename(columns={i+1: meses_nombres[i][:3] for i in range(12)})
-                st.subheader(f"Productividad Histórica {anio_sel}")
-                st.dataframe(matriz.style.background_gradient(cmap='Blues', axis=None), use_container_width=True)
+                # FILTRO CLAVE: Solo el mes y año configurados por ti
+                df_mes_vista = df[(df['Fecha_DT'].dt.month == mes_num) & 
+                                  (df['Fecha_DT'].dt.year == anio_sel) & 
+                                  (df['Estatus'].str.contains('RESUELTA', case=False, na=False))].copy()
+                
+                st.subheader(f"Productividad en {mes_sel} {anio_sel}")
+                
+                # Resumen de Resueltos por Técnico
+                resumen_vista = df_mes_vista.groupby('Técnico').agg(
+                    Folios_Resueltos=('Folio', 'count'),
+                    Equipos_Distintos=(col_serie, 'nunique')
+                ).reset_index()
+
+                # Mostrar tabla con estilo similar al que enviaste (azul)
+                st.dataframe(
+                    resumen_vista.sort_values('Folios_Resueltos', ascending=False).style.background_gradient(cmap='Blues', subset=['Folios_Resueltos']),
+                    use_container_width=True, 
+                    hide_index=True
+                )
+                
+                st.info(f"Mostrando únicamente los folios resueltos durante el mes de **{mes_sel}**.")
 
             with tab_auditoria:
-                st.subheader(f"Análisis de Fallas en {mes_sel} {anio_sel}")
+                st.subheader(f"Auditoría de Garantía: {mes_sel}")
+                # Solo folios que reincidieron (fallaron) en el mes seleccionado
+                df_penal = df[(df['Fecha_DT'].dt.month == mes_num) & (df['Fecha_DT'].dt.year == anio_sel)].copy()
                 
-                # Solo folios que fallaron en el mes seleccionado por el usuario
-                df_mes_audit = df[(df['Fecha_DT'].dt.month == mes_num) & (df['Fecha_DT'].dt.year == anio_sel)].copy()
+                ranking = df_penal.groupby('Tecnico_Ant').agg(
+                    Penalizaciones=('Es_Penalizacion', 'sum')
+                ).reset_index().rename(columns={'Tecnico_Ant': 'Técnico Responsable'})
                 
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.markdown("#### Técnicos con Garantías Incumplidas")
-                    # Agrupamos por el que hizo el trabajo mal (el anterior)
-                    ranking = df_mes_audit.groupby('Tecnico_Ant').agg(
-                        Casos_Reincidentes=('Es_Penalizacion', 'sum')
-                    ).reset_index().rename(columns={'Tecnico_Ant': 'Técnico Responsable'})
-                    
-                    st.dataframe(ranking.sort_values('Casos_Reincidentes', ascending=False), use_container_width=True, hide_index=True)
-
-                with col2:
-                    st.markdown("#### Buscador de Evidencia")
-                    nombre = st.text_input("Nombre del Técnico:").upper()
-                    if nombre:
-                        evid = df_mes_audit[(df_mes_audit['Tecnico_Ant'].str.contains(nombre, na=False)) & (df_mes_audit['Es_Penalizacion'] == 1)]
-                        st.metric("Penalizaciones Detectadas", len(evid))
-
-                st.divider()
-                st.markdown(f"#### Detalle de Folios que 'rebotaron' en {mes_sel}")
-                evidencia_total = df_mes_audit[df_mes_audit['Es_Penalizacion'] == 1]
-                st.dataframe(
-                    evidencia_total[[col_serie, 'Folio', 'Fecha_DT', 'Tecnico_Ant', 'Folio_Ant', 'Dias_Garantia']].rename(
-                        columns={'Folio': 'Folio Falla Hoy', 'Tecnico_Ant': 'Responsable', 'Folio_Ant': 'Folio Original', 'Dias_Garantia': 'Días Duró'}
-                    ), use_container_width=True, hide_index=True
-                )
+                st.dataframe(ranking.sort_values('Penalizaciones', ascending=False), use_container_width=True, hide_index=True)
 
         except Exception as e:
             st.error(f"Error: {e}")
     else:
-        st.info("👈 Selecciona el archivo y configura el mes en la barra lateral.")
+        st.info("👈 Configura el mes y carga el reporte para comenzar.")
 
 if __name__ == "__main__":
     main()
