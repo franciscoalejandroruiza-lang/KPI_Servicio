@@ -6,14 +6,13 @@ st.set_page_config(page_title="SenAudit Pro - Auditoría Real", layout="wide")
 
 def main():
     st.title("🛡️ Auditoría SenAudit Pro")
-    st.markdown("Cálculo de penalizaciones por reincidencia (Garantía Móvil).")
+    st.markdown("Cálculo de penalizaciones por reincidencia (Garantía de 3 meses).")
 
-    # Selector de tipo de archivo para mayor flexibilidad
     archivo = st.sidebar.file_uploader("Subir Reporte de Servicio", type=["xlsx", "xlsb"])
 
     if archivo:
         try:
-            # 1. Carga de datos (Soporta Excel y XLSB)
+            # 1. CARGA TOTAL (Sin filtrar nada aún)
             engine = 'openpyxl' if archivo.name.endswith('xlsx') else 'pyxlsb'
             df = pd.read_excel(archivo, engine=engine)
             df.columns = df.columns.str.strip()
@@ -21,91 +20,69 @@ def main():
             col_fecha = 'Fecha recepción' if 'Fecha recepción' in df.columns else 'Última visita'
             col_serie = 'N.° de serie' if 'N.° de serie' in df.columns else 'N.° de equipo'
             
-            # Normalización
             df['Fecha_DT'] = pd.to_datetime(df[col_fecha], errors='coerce').dt.tz_localize(None)
             df['Técnico'] = df['Técnico'].str.strip().str.upper()
             
-            # 2. Parámetros de la interfaz
-            st.sidebar.header("Parámetros de Auditoría")
-            dias_garantia = st.sidebar.slider("Días de garantía (Reincidencia)", 1, 365, 90)
+            # 2. PARÁMETROS
+            st.sidebar.header("Configuración")
+            dias_garantia = st.sidebar.slider("Días de garantía", 1, 365, 90)
             
             meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-            mes_sel = st.sidebar.selectbox("Mes a visualizar", meses_nombres, index=datetime.now().month - 1)
+            mes_sel = st.sidebar.selectbox("Mes a auditar", meses_nombres, index=datetime.now().month - 1)
             mes_num = meses_nombres.index(mes_sel) + 1
             anio_eval = st.sidebar.number_input("Año", value=2026)
 
-            # --- LÓGICA MATEMÁTICA CON PANDAS ---
-            
-            # Ordenamos todo el historial cronológicamente por serie
+            # 3. MATEMÁTICAS PANDAS (Lógica de "El último es intocable")
+            # Ordenamos todo el universo de datos
             df = df.sort_values([col_serie, 'Fecha_DT'], ascending=True)
 
-            # "Shift" para traer la fecha del siguiente folio de la misma serie
-            df['Fecha_Siguiente'] = df.groupby(col_serie)['Fecha_DT'].shift(-1)
-            df['Folio_Siguiente'] = df.groupby(col_serie)['Folio'].shift(-1)
+            # Calculamos la reincidencia mirando HACIA ADELANTE en todo el archivo
+            df['Fecha_Sig'] = df.groupby(col_serie)['Fecha_DT'].shift(-1)
+            df['Folio_Sig'] = df.groupby(col_serie)['Folio'].shift(-1)
+            df['Dias_Diff'] = (df['Fecha_Sig'] - df['Fecha_DT']).dt.days
+
+            # Aplicamos la penalización: 
+            # SI tiene un siguiente AND es Correctivo/Resuelta AND está en rango de días
+            cond_cat = df['Categoría'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
+            cond_est = df['Estatus'].astype(str).str.upper().str.contains('RESUELTA', na=False)
+            cond_dias = (df['Dias_Diff'] >= 0) & (df['Dias_Diff'] <= dias_garantia)
+
+            df['Es_Penalizacion'] = (cond_cat & cond_est & cond_dias).astype(int)
+
+            # 4. FILTRADO PARA MOSTRAR SOLO EL MES ELEGIDO
+            # Aquí es donde separamos lo que queremos ver, pero la penalización ya se calculó
+            # usando incluso folios de meses siguientes si fue necesario.
+            df_mes = df[(df['Fecha_DT'].dt.month == mes_num) & (df['Fecha_DT'].dt.year == anio_eval)].copy()
+
+            # --- VISUALIZACIÓN ---
+            col1, col2 = st.columns(2)
             
-            # Cálculo de la diferencia de días (Delta T)
-            df['Dias_Reincidencia'] = (df['Fecha_Siguiente'] - df['Fecha_DT']).dt.days
-
-            # Definición de condiciones de penalización
-            # El último folio de cada serie tendrá Dias_Reincidencia como NaN, 
-            # por lo que automáticamente NO será penalizado (es el "Intocable").
-            es_correctivo = df['Categoría'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
-            es_resuelta = df['Estatus'].astype(str).str.upper().str.contains('RESUELTA', na=False)
-            dentro_garantia = (df['Dias_Reincidencia'] >= 0) & (df['Dias_Reincidencia'] <= dias_garantia)
-
-            df['Es_Penalizacion'] = (es_correctivo & es_resuelta & dentro_garantia).astype(int)
-
-            # --- FILTRADO POR MES SELECCIONADO ---
-            # Ahora que ya calculamos sobre TODO el historial, filtramos solo lo que el usuario quiere ver
-            mask_mes = (df['Fecha_DT'].dt.month == mes_num) & (df['Fecha_DT'].dt.year == anio_eval)
-            df_mes = df[mask_mes].copy()
-
-            # --- INTERFAZ DE RESULTADOS ---
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                st.subheader(f"📊 Eficiencia: {mes_sel} {anio_eval}")
+            with col1:
+                st.subheader(f"Resumen {mes_sel}")
                 resumen = df_mes.groupby('Técnico').agg(
-                    Total_Correctivos=('Folio', 'count'),
+                    Total_Servicios=('Folio', 'count'),
                     Penalizaciones=('Es_Penalizacion', 'sum')
                 ).reset_index()
-                
-                resumen['% Efectividad'] = 100.0
-                mask_total = resumen['Total_Correctivos'] > 0
-                resumen.loc[mask_total, '% Efectividad'] = (
-                    (resumen['Total_Correctivos'] - resumen['Penalizaciones']) / resumen['Total_Correctivos'] * 100
-                ).round(1)
-                
+                resumen['% Efectividad'] = ((resumen['Total_Servicios'] - resumen['Penalizaciones']) / resumen['Total_Servicios'] * 100).round(1)
                 st.dataframe(resumen.sort_values('Penalizaciones', ascending=False), use_container_width=True, hide_index=True)
 
-            with c2:
-                st.subheader("🔍 Buscador de Evidencia")
-                tec_auditar = st.text_input("Nombre del técnico:").upper()
-                if tec_auditar:
-                    filtro_tec = df_mes[df_mes['Técnico'].str.contains(tec_auditar, na=False)]
-                    st.metric(f"Penalizaciones en {mes_sel}", filtro_tec['Es_Penalizacion'].sum())
+            with col2:
+                st.subheader("Verificar Técnico")
+                tec = st.text_input("Nombre:").upper()
+                if tec:
+                    puntos = df_mes[df_mes['Técnico'].str.contains(tec, na=False)]['Es_Penalizacion'].sum()
+                    st.metric(f"Penalizaciones de {tec}", puntos)
 
             st.divider()
-            st.subheader(f"📋 Listado de Reincidencias Detectadas ({mes_sel})")
+            st.subheader(f"Lista de Evidencia ({mes_sel})")
+            # Solo mostramos los que SI penalizaron para que los compares con tus 89
             evidencia = df_mes[df_mes['Es_Penalizacion'] == 1]
-            
             if not evidencia.empty:
-                cols_final = ['Folio', 'Técnico', col_serie, 'Fecha_DT', 'Dias_Reincidencia', 'Folio_Siguiente']
-                st.dataframe(
-                    evidencia[cols_final].rename(columns={
-                        'Fecha_DT': 'Fecha Original',
-                        'Dias_Reincidencia': 'Días p/ Fallar',
-                        'Folio_Siguiente': 'Folio Reincidente'
-                    }), 
-                    use_container_width=True, hide_index=True
-                )
+                st.dataframe(evidencia[[col_serie, 'Folio', 'Técnico', 'Fecha_DT', 'Dias_Diff', 'Folio_Sig']], use_container_width=True)
             else:
-                st.success(f"Excelente: No hay reincidencias en {mes_sel} con garantía de {dias_garantia} días.")
+                st.info("No se encontraron penalizaciones con estos filtros.")
 
         except Exception as e:
-            st.error(f"Se produjo un error al procesar el archivo: {e}")
-    else:
-        st.info("👈 Por favor, carga tu archivo para iniciar el análisis.")
-
-if __name__ == "__main__":
-    main()
+            st.error(f"Error: {e}")
+            
