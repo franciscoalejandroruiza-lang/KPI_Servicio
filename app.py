@@ -1,112 +1,100 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import calendar
 
-st.set_page_config(page_title="SenAudit Pro - Ventana Deslizante", layout="wide")
+st.set_page_config(page_title="SenAudit Pro - Control de Calidad", layout="wide")
 
 def main():
-    # --- INTERFAZ: ENCABEZADO ---
-    st.title("🛡️ Auditoría SenAudit Pro")
-    st.markdown("### Análisis de Reincidencias (Ventana de 3 Meses)")
-    st.info("Al seleccionar un mes, el sistema analizará ese mes y los dos anteriores para detectar reincidencias.")
+    st.title("🛡️ Auditoría de Efectividad: SenAudit Pro")
+    st.markdown("### Objetivo: ¿El técnico hizo bien el trabajo a la primera?")
 
-    # --- INTERFAZ: BARRA LATERAL (FILTROS) ---
-    st.sidebar.header("📂 Carga y Configuración")
-    archivo = st.sidebar.file_uploader("Subir Reporte de Servicio", type=["xlsx", "xlsb", "csv"])
+    archivo = st.sidebar.file_uploader("Subir Reporte de Servicio", type=["xlsx", "xlsb"])
 
     if archivo:
         try:
-            # Determinación del motor de lectura
-            if archivo.name.endswith('xlsb'):
-                df = pd.read_excel(archivo, engine='pyxlsb')
-            elif archivo.name.endswith('csv'):
-                df = pd.read_csv(archivo)
-            else:
-                df = pd.read_excel(archivo, engine='openpyxl')
-
+            # 1. Carga de datos
+            engine = 'openpyxl' if archivo.name.endswith('xlsx') else 'pyxlsb'
+            df = pd.read_excel(archivo, engine=engine)
             df.columns = df.columns.str.strip()
             
-            # Identificación de columnas críticas
             col_fecha = 'Fecha recepción' if 'Fecha recepción' in df.columns else 'Última visita'
             col_serie = 'N.° de serie' if 'N.° de serie' in df.columns else 'N.° de equipo'
             
-            # Normalización de datos
             df['Fecha_DT'] = pd.to_datetime(df[col_fecha], errors='coerce').dt.tz_localize(None)
             df['Técnico'] = df['Técnico'].str.strip().str.upper()
-            df = df.dropna(subset=['Fecha_DT', col_serie])
 
-            # --- SELECTORES DE TIEMPO ---
+            # 2. Configuración del Mes de Análisis
+            st.sidebar.header("Filtro de Auditoría")
             meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+            mes_sel = st.sidebar.selectbox("Mes a evaluar (Folios Resueltos)", meses_nombres, index=1)
+            anio_sel = st.sidebar.number_input("Año", value=2026)
+            mes_num = meses_nombres.index(mes_sel) + 1
+
+            # --- LÓGICA DE AUDITORÍA ---
             
-            mes_corte_nom = st.sidebar.selectbox("Mes de Corte (Final)", meses_nombres, index=1) # Default Febrero
-            anio_corte = st.sidebar.number_input("Año", value=2026)
+            # Ordenamos todo el historial para poder comparar
+            df = df.sort_values([col_serie, 'Fecha_DT'], ascending=True)
+
+            # Identificamos el siguiente evento de cada máquina en todo el historial
+            df['Sig_Fecha'] = df.groupby(col_serie)['Fecha_DT'].shift(-1)
+            df['Sig_Folio'] = df.groupby(col_serie)['Folio'].shift(-1)
+            df['Sig_Cat'] = df.groupby(col_serie)['Categoría'].shift(-1)
             
-            # Cálculo matemático de la ventana de 3 meses
-            mes_final_num = meses_nombres.index(mes_corte_nom) + 1
-            fecha_fin = datetime(anio_corte, mes_final_num, 1) + pd.offsets.MonthEnd(0)
-            fecha_inicio = (fecha_fin - pd.DateOffset(months=2)).replace(day=1)
+            # Calculamos días para la siguiente falla
+            df['Dias_Garantia'] = (df['Sig_Fecha'] - df['Fecha_DT']).dt.days
 
-            st.sidebar.success(f"Auditando: {fecha_inicio.strftime('%b %Y')} a {fecha_fin.strftime('%b %Y')}")
+            # DEFINICIÓN DE PENALIZACIÓN:
+            # 1. El folio actual debe ser CORRECTIVO y RESUELTO.
+            # 2. Debe existir un folio SIGUIENTE que sea CORRECTIVO.
+            # 3. Esa reincidencia debe ocurrir en <= 90 días.
+            es_correctivo = df['Categoría'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
+            es_resuelta = df['Estatus'].astype(str).str.upper().str.contains('RESUELTA', na=False)
+            sig_es_correctivo = df['Sig_Cat'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
+            reincide_pronto = (df['Dias_Garantia'] >= 0) & (df['Dias_Garantia'] <= 90)
 
-            # --- LÓGICA DE PROCESAMIENTO ---
-            # 1. Filtrar solo los datos de la ventana de 3 meses
-            df_ventana = df[(df['Fecha_DT'] >= fecha_inicio) & (df['Fecha_DT'] <= fecha_fin)].copy()
-            df_ventana = df_ventana.sort_values([col_serie, 'Fecha_DT'], ascending=True)
+            df['Es_Penalizacion'] = (es_correctivo & es_resuelta & sig_es_correctivo & reincide_pronto).astype(int)
 
-            # 2. Calcular reincidencia (Mirar al siguiente folio de la misma serie)
-            df_ventana['Fecha_Sig'] = df_ventana.groupby(col_serie)['Fecha_DT'].shift(-1)
-            df_ventana['Folio_Sig'] = df_ventana.groupby(col_serie)['Folio'].shift(-1)
-            df_ventana['Dias_Diff'] = (df_ventana['Fecha_Sig'] - df_ventana['Fecha_DT']).dt.days
+            # --- FILTRADO FINAL ---
+            # Solo mostramos los folios que el técnico "entregó" en el mes seleccionado
+            df_mes = df[(df['Fecha_DT'].dt.month == mes_num) & (df['Fecha_DT'].dt.year == anio_eval)].copy()
 
-            # 3. Marcar penalizaciones (Correctivo + Resuelta + <= 90 días)
-            es_correctivo = df_ventana['Categoría'].astype(str).str.upper().str.contains('CORRECTIVO', na=False)
-            es_resuelta = df_ventana['Estatus'].astype(str).str.upper().str.contains('RESUELTA', na=False)
-            df_ventana['Es_Penalizacion'] = (es_correctivo & es_resuelta & (df_ventana['Dias_Diff'] <= 90)).astype(int)
+            # --- INTERFAZ ---
+            col1, col2 = st.columns([2, 1])
 
-            # --- INTERFAZ: VISUALIZACIÓN DE RESULTADOS ---
-            tab1, tab2 = st.tabs(["📈 Resumen de Técnicos", "📋 Detalle de Folios"])
-
-            with tab1:
-                col1, col2 = st.columns([2, 1])
+            with col1:
+                st.subheader(f"Efectividad de Técnicos en {mes_sel}")
+                resumen = df_mes.groupby('Técnico').agg(
+                    Folios_Resueltos=('Folio', 'count'),
+                    Reincidencias_90d=('Es_Penalizacion', 'sum')
+                ).reset_index()
                 
-                with col1:
-                    st.subheader(f"Penalizaciones Acumuladas ({mes_corte_nom} + 2 meses atrás)")
-                    resumen = df_ventana.groupby('Técnico').agg(
-                        Folios_Totales=('Folio', 'count'),
-                        Penalizaciones=('Es_Penalizacion', 'sum')
-                    ).reset_index()
-                    
-                    resumen['% Efectividad'] = ((resumen['Folios_Totales'] - resumen['Penalizaciones']) / resumen['Folios_Totales'] * 100).round(1)
-                    st.dataframe(resumen.sort_values('Penalizaciones', ascending=False), use_container_width=True, hide_index=True)
+                resumen['Trabajos_Bien_Hechos'] = resumen['Folios_Resueltos'] - resumen['Reincidencias_90d']
+                resumen['% Calidad'] = (resumen['Trabajos_Bien_Hechos'] / resumen['Folios_Resueltos'] * 100).round(1)
+                
+                st.dataframe(resumen.sort_values('Reincidencias_90d', ascending=False), use_container_width=True, hide_index=True)
 
-                with col2:
-                    st.subheader("🔍 Filtro Rápido")
-                    tec_buscado = st.text_input("Buscar técnico específico:").upper()
-                    if tec_buscado:
-                        puntos = df_ventana[df_ventana['Técnico'].str.contains(tec_buscado, na=False)]['Es_Penalizacion'].sum()
-                        st.metric(label=f"Total Penalizaciones", value=int(puntos))
-                        st.caption(f"Resultado para {tec_buscado} en el periodo seleccionado.")
+            with col2:
+                st.subheader("🔎 Auditoría Individual")
+                nombre = st.text_input("Buscar Técnico:").upper()
+                if nombre:
+                    tec_data = df_mes[df_mes['Técnico'].str.contains(nombre, na=False)]
+                    total_p = tec_data['Es_Penalizacion'].sum()
+                    st.metric("Folios que 'rebotaron'", int(total_p))
+                    st.progress(float(resumen[resumen['Técnico'].str.contains(nombre, na=False)]['% Calidad'].iloc[0] / 100))
 
-            with tab2:
-                st.subheader("Evidencia de Reincidencias")
-                evidencia = df_ventana[df_ventana['Es_Penalizacion'] == 1]
-                if not evidencia.empty:
-                    st.write("Estos son los folios que el sistema marcó como fallidos:")
-                    st.dataframe(
-                        evidencia[[col_serie, 'Folio', 'Técnico', 'Fecha_DT', 'Dias_Diff', 'Folio_Sig']].rename(
-                            columns={'Fecha_DT': 'Fecha Visita', 'Dias_Diff': 'Días p/ reincidir', 'Folio_Sig': 'Folio de Reincidencia'}
-                        ), use_container_width=True, hide_index=True
-                    )
-                else:
-                    st.success("No se encontraron reincidencias en este periodo.")
+            st.divider()
+            st.subheader(f"📋 Evidencia de Fallas (Folios de {mes_sel} que no quedaron bien)")
+            evidencia = df_mes[df_mes['Es_Penalizacion'] == 1]
+            if not evidencia.empty:
+                st.dataframe(evidencia[[col_serie, 'Folio', 'Técnico', 'Fecha_DT', 'Dias_Garantia', 'Sig_Folio']].rename(
+                    columns={'Fecha_DT': 'Fecha Cierre', 'Dias_Garantia': 'Días que duró la reparación', 'Sig_Folio': 'Folio de Reincidencia'}
+                ), use_container_width=True, hide_index=True)
 
         except Exception as e:
-            st.error(f"Error al procesar: {e}")
+            st.error(f"Error: {e}")
     else:
-        st.warning("👈 Sube el archivo Excel o CSV en la barra lateral para comenzar.")
+        st.info("👈 Sube el reporte para auditar la calidad del servicio.")
 
 if __name__ == "__main__":
     main()
-    
